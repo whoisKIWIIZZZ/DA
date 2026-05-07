@@ -209,6 +209,9 @@ def train_target(cfg):
     class_num = cfg.class_num
     print("ProDe+diff: class_num={}, class_num_hidden={}".format(class_num, class_num_hidden))
 
+    # Must call clip_pre_text first: it sets cfg.classname needed by create_negative_text_features
+    text_inputs = clip_pre_text(cfg)
+
     # Load raw CLIP to create negative text features (used once at init)
     raw_clip_model, _, _ = clip.load(cfg.ProDe.ARCH)
     raw_clip_model.float()
@@ -216,8 +219,6 @@ def train_target(cfg):
     negative_text_features = create_negative_text_features(cfg, raw_clip_model, class_num_hidden)
     del raw_clip_model
     print("Created negative text features: shape =", negative_text_features.shape)
-
-    text_inputs = clip_pre_text(cfg)
     dset_loaders = data_load(cfg)
     model = get_coop(cfg.ProDe.ARCH, cfg.SETTING.DATASET, int(cfg.GPU_ID), cfg.ProDe.N_CTX, cfg.ProDe.CTX_INIT)
     for name, param in model.named_parameters():
