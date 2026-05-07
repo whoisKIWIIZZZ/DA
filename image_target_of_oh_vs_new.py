@@ -18,6 +18,7 @@ import src.methods.oh.difo_50 as DIFO_50
 import src.methods.oh.diffadd_new_opt_old  as DIFFOPT
 #import src.methods.oh.diffadd_new_opt_50  as DIFFOPT_50
 import src.methods.oh.ProDe as ProDe
+import src.methods.oh.ProDe_diff as ProDe_diff
 import src.methods.oh.diff_new_opt_new_50 as DIFF_ALIGN_50
 import src.methods.oh.diff_new_opt_new as DIFF_ALIGN
 import src.methods.oh.draw_visda as DRAW_VISDA
@@ -133,6 +134,9 @@ if __name__ == "__main__":
         print("using ProDe method")
         acc = ProDe.train_target(cfg)
 
+    elif cfg.MODEL.METHOD == "ProDe_diff":
+        print("using ProDe+diff method (with negative classes)")
+        acc = ProDe_diff.train_target(cfg)
 
     elif cfg.MODEL.METHOD == "plue":
         print("using plue method")
