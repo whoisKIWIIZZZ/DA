@@ -118,6 +118,29 @@ def op_copy(optimizer):
         param_group['lr0'] = param_group['lr']
     return optimizer
 
+def cal_clip_acc(loader, model, negative_text_features, N):
+    start_test = True
+    with torch.no_grad():
+        iter_test = iter(loader)
+        for i in range(len(loader)):
+            data = next(iter_test)
+            inputs = data[0]
+            labels = data[1]
+            inputs = inputs.cuda()
+            logits, _ = clip_forward_extended(model, inputs, negative_text_features)
+            outputs = logits[:, :N]
+            if start_test:
+                all_output = outputs.float().cpu()
+                all_label = labels.float()
+                start_test = False
+            else:
+                all_output = torch.cat((all_output, outputs.float().cpu()), 0)
+                all_label = torch.cat((all_label, labels.float()), 0)
+    _, predict = torch.max(all_output, 1)
+    accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
+    return accuracy * 100
+
+
 def print_cfg(cfg):
     s = "==========================================\n"
     for arg, content in cfg.__dict__.items():
@@ -176,22 +199,18 @@ def clip_forward_extended(model, inputs, negative_text_features):
     return logits, text_features_all
 
 
-def test_time_tuning_diff(model, inputs, optimizer, cfg, target_output, negative_text_features, N):
+def test_time_tuning_diff(model, inputs, optimizer, cfg, target_output):
     """
-    TTA inner loop with N+H dims.
-    target_output: [B, N+H] from netC_aux.
-    Only CoOp prompt_learner (N classes) is updated; negative features stay fixed.
+    TTA inner loop with N-class target from netC (clean, no hidden class noise).
+    Uses standard IID_loss_old like original ProDe.
     """
     target_output = target_output.cuda()
     target_output = nn.Softmax(dim=1)(target_output)
     for j in range(cfg.ProDe.TTA_STEPS):
         with torch.amp.autocast('cuda'):
-            output_logits, _ = clip_forward_extended(model, inputs, negative_text_features)
+            output_logits, _ = model(inputs)
             output = nn.Softmax(dim=1)(output_logits)
-            iic_loss, _ = IID_losses.IID_loss(
-                N, output, target_output,
-                w_base=1.0, w_aux=1.0, bn=-0.3, lamb=1.0
-            )
+            iic_loss = IID_losses.IID_loss_old(output, target_output)
         optimizer.zero_grad()
         iic_loss.backward()
         optimizer.step()
@@ -200,7 +219,7 @@ def test_time_tuning_diff(model, inputs, optimizer, cfg, target_output, negative
 
 def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target_output, negative_text_features, N):
     optimizer.load_state_dict(optim_state)
-    output = test_time_tuning_diff(model, inputs, optimizer, cfg, target_output, negative_text_features, N)
+    test_time_tuning_diff(model, inputs, optimizer, cfg, target_output)
     with torch.no_grad():
         with torch.amp.autocast('cuda'):
             model.eval()
@@ -340,10 +359,6 @@ def train_target(cfg):
         iter_num += 1
         lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
 
-        current_aux = aux_begin + (aux_end - aux_begin) * (iter_num / max_iter)
-        bb = 1 - current_aux
-        nnn = 1 - current_aux if iter_num > 100 else 0.01
-
         features_test = netB(netF(inputs_test))
         outputs_test = netC(features_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
@@ -362,10 +377,11 @@ def train_target(cfg):
         else:
             inputs_test_clip = inputs_test
 
-        # TTA with extended dims: CLIP aligns to netC_aux (N+H)
+        # TTA: use N-class netC output as target (clean, no hidden-class noise)
+        # CLIP forward produces N+H output for the main IID loss below
         clip_score_NH = test_time_adapt_eval_diff(
             inputs_test_clip, model, optimizer_ib, optim_state, cfg,
-            outputs_test_aux_new, negative_text_features, class_num
+            outputs_test_new, negative_text_features, class_num
         )
         clip_score_NH = clip_score_NH.float()
         clip_score_N = clip_score_NH[:, :class_num]  # known classes for pseudo-label
@@ -382,8 +398,8 @@ def train_target(cfg):
             class_num,
             softmax_out_aux,
             clip_score_NH,
-            w_base=bb,
-            w_aux=nnn,
+            w_base=1.0,
+            w_aux=1.0,
             bn=-0.3,
             lamb=1.0
         )
@@ -416,12 +432,14 @@ def train_target(cfg):
             netF.eval()
             netB.eval()
             netC.eval()
+            model.eval()
+            clip_acc = cal_clip_acc(dset_loaders['test'], model, negative_text_features, class_num)
             if cfg.SETTING.DATASET == 'VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss) + '\n' + acc_list
+                log_str = 'Task: {}, Iter:{}/{}; Acc = {:.2f}%; CLIP_Acc = {:.2f}%; loss = {}'.format(cfg.name, iter_num, max_iter, acc_s_te, clip_acc, classifier_loss) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss)
+                log_str = 'Task: {}, Iter:{}/{}; Acc = {:.2f}%; CLIP_Acc = {:.2f}%; loss = {}'.format(cfg.name, iter_num, max_iter, acc_s_te, clip_acc, classifier_loss)
 
             logger.info(log_str)
             netF.train()
