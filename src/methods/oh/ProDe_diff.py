@@ -1,3 +1,4 @@
+#prode_diff.py
 import os.path as osp
 import numpy as np
 import torch
@@ -226,7 +227,18 @@ def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target
         with torch.amp.autocast('cuda'):
             model.eval()
             output_logits, _ = clip_forward_extended(model, inputs, negative_text_features)
-            output = nn.Softmax(dim=1)(output_logits)
+            # Separate softmax for N-class and H-class to prevent probability dilution.
+            # Joint N+H softmax would let hidden classes steal mass from known classes,
+            # weakening the CLIP signal in pseudo-label fusion.
+            has_hidden = (negative_text_features is not None and negative_text_features.shape[0] > 0)
+            if has_hidden:
+                logits_N = output_logits[:, :N]
+                logits_H = output_logits[:, N:]
+                score_N = nn.Softmax(dim=1)(logits_N)
+                score_H = nn.Softmax(dim=1)(logits_H)
+                output = torch.cat([score_N, score_H], dim=1)
+            else:
+                output = nn.Softmax(dim=1)(output_logits)
     return output
 
 
