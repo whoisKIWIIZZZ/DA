@@ -295,6 +295,8 @@ _C.ProDe.N_CTX = 4
 _C.ProDe.ARCH = 'ViT-B/32' #['RN50', 'ViT-B/32','RN101','ViT-B/16']
 _C.ProDe.TTA_STEPS = 1
 _C.ProDe.IIC_PAR = 1.3
+_C.ProDe.REP_PAR = 0.1
+_C.ProDe.REP_TOPK = 5
 _C.ProDe.LOAD = None
 
 
