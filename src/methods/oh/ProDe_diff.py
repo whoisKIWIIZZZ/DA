@@ -284,7 +284,10 @@ def train_target(cfg):
             new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
             if class_num_hidden > 0:
                 torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
-                new_fc.bias.data[cfg.class_num:].zero_()
+                # Init hidden bias negative so hidden logits start near zero,
+                # keeping known-class probs intact. Model naturally learns to
+                # increase hidden bias when hidden dims carry useful signal.
+                new_fc.bias.data[cfg.class_num:].fill_(-5.0)
         netC_aux.fc = new_fc
 
     netC.eval()
