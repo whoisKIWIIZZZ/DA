@@ -227,19 +227,9 @@ def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target
         with torch.amp.autocast('cuda'):
             model.eval()
             output_logits, _ = clip_forward_extended(model, inputs, negative_text_features)
-            # Separate softmax for N-class and H-class to prevent probability dilution.
-            # Joint N+H softmax would let hidden classes steal mass from known classes,
-            # weakening the CLIP signal in pseudo-label fusion.
-            has_hidden = (negative_text_features is not None and negative_text_features.shape[0] > 0)
-            if has_hidden:
-                logits_N = output_logits[:, :N]
-                logits_H = output_logits[:, N:]
-                score_N = nn.Softmax(dim=1)(logits_N)
-                score_H = nn.Softmax(dim=1)(logits_H)
-                output = torch.cat([score_N, score_H], dim=1)
-            else:
-                output = nn.Softmax(dim=1)(output_logits)
-    return output
+    # Return logits (same as ProDe). Pseudo-label fusion needs logits for
+    # discriminative power; softmax would flatten the CLIP signal.
+    return output_logits
 
 
 def train_target(cfg):
@@ -401,31 +391,30 @@ def train_target(cfg):
         else:
             inputs_test_clip = inputs_test
 
-        # TTA with N-class netC target (clean, no hidden-class noise)
-        # When H>0, eval forward produces N+H via clip_forward_extended
-        # When H=0, eval forward produces N-class (same as original ProDe)
+        # clip_score is logits (same as ProDe test_time_adapt_eval).
+        # Pseudo-label fusion needs logits for discriminative power.
         clip_score = test_time_adapt_eval_diff(
             inputs_test_clip, model, optimizer_ib, optim_state, cfg,
             outputs_test_new, negative_text_features, class_num
         )
         clip_score = clip_score.float()
 
-        if use_hidden:
-            clip_score_N = clip_score[:, :class_num]
-        else:
-            clip_score_N = clip_score
+        # N-class logits for pseudo-label fusion
+        clip_logits_N = clip_score[:, :class_num] if use_hidden else clip_score
 
-        # Pseudo-label fusion (same as ProDe, N-class only)
+        # Pseudo-label fusion (same as ProDe: softmax - softmax + logits)
         with torch.no_grad():
-            new_clip = (outputs_test_new - 1 * logtis_bank[tar_idx].cuda()) + clip_score_N.cuda()
+            new_clip = (outputs_test_new - 1 * logtis_bank[tar_idx].cuda()) + clip_logits_N.cuda()
             clip_score_sm = nn.Softmax(dim=1)(new_clip)
 
         _, clip_index_new = torch.max(new_clip, 1)
 
         if use_hidden:
-            # Smooth extension of ProDe: N-class uses fused pseudo-label (identical to ProDe),
-            # H-class uses raw CLIP hidden dims. Model can naturally ignore hidden dims.
-            clip_score_hybrid = torch.cat([clip_score_sm, clip_score[:, class_num:]], dim=1)
+            # Separate softmax for N and H (prevent hidden from diluting known)
+            score_N = nn.Softmax(dim=1)(clip_score[:, :class_num])
+            score_H = nn.Softmax(dim=1)(clip_score[:, class_num:])
+            # Hybrid target: N-class fused pseudo-label + H-class CLIP softmax
+            clip_score_hybrid = torch.cat([clip_score_sm, score_H], dim=1)
             iic_loss, _ = IID_losses.IID_loss(
                 class_num,
                 softmax_out_aux,
