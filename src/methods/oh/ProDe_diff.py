@@ -138,7 +138,12 @@ def copy_netC(netC, netC_aux, num_known_classes):
 
 
 def create_negative_text_features(cfg, clip_model, class_num_hidden):
-    classnames_for_negative_prompts = cfg.classname
+    # Read class names directly from file (avoid relying on cfg.classname being pre-set)
+    classnames_for_negative_prompts = []
+    with open(cfg.name_file) as f:
+        for line in f:
+            classnames_for_negative_prompts.extend([i for i in line.split()])
+    classnames_for_negative_prompts = [name.replace("_", " ") for name in classnames_for_negative_prompts]
     negative_prompt_base_prefix = " a photo of not "
     negative_prompts_list = []
     for cls_name in classnames_for_negative_prompts:
