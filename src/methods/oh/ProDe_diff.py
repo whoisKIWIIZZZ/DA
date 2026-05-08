@@ -300,9 +300,11 @@ def train_target(cfg):
     model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
 
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
-    interval_iter = max_iter * 5 // cfg.TEST.INTERVAL
+    interval_iter = max_iter // cfg.TEST.INTERVAL
     copy_iter = max_iter // 15 // cfg.TEST.INTERVAL
     iter_num = 0
+    aux_begin = 0.3
+    aux_end = 0
     num_sample = len(dset_loaders["target"].dataset)
     logtis_bank = torch.randn(num_sample, cfg.class_num).cuda()
 
@@ -337,6 +339,10 @@ def train_target(cfg):
 
         iter_num += 1
         lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
+
+        current_aux = aux_begin + (aux_end - aux_begin) * (iter_num / max_iter)
+        bb = 1 - current_aux
+        nnn = 1 - current_aux if iter_num > 100 else 0.01
 
         features_test = netB(netF(inputs_test))
         outputs_test = netC(features_test)
@@ -376,8 +382,8 @@ def train_target(cfg):
             class_num,
             softmax_out_aux,
             clip_score_NH,
-            w_base=1.0,
-            w_aux=1.0,
+            w_base=bb,
+            w_aux=nnn,
             bn=-0.3,
             lamb=1.0
         )
