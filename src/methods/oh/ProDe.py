@@ -202,7 +202,7 @@ def train_target(cfg):
     optim_state = deepcopy(optimizer_ib.state_dict())
     model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
-    interval_iter = max_iter * 5 // cfg.TEST.INTERVAL
+    interval_iter = max_iter // cfg.TEST.INTERVAL
     iter_num = 0
     num_sample=len(dset_loaders["target"].dataset)
     logtis_bank = torch.randn(num_sample, cfg.class_num).cuda()

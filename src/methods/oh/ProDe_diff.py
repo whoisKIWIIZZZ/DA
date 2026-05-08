@@ -185,11 +185,13 @@ def clip_forward_extended(model, inputs, negative_text_features):
     """
     CLIP forward that extends CoOp's N-class output to N+H classes.
     Returns (logits_NH, text_features_NH).
-    Only the N known-class text features have gradients (through CoOp prompt_learner).
-    The H negative text features are fixed (no grad).
+    When negative_text_features is None or empty, reverts to standard N-class output.
     """
     text_features_N = model.get_text_features()  # [N, D], has grad through prompt_learner
-    text_features_all = torch.cat([text_features_N, negative_text_features], dim=0)  # [N+H, D]
+    if negative_text_features is not None and negative_text_features.shape[0] > 0:
+        text_features_all = torch.cat([text_features_N, negative_text_features], dim=0)  # [N+H, D]
+    else:
+        text_features_all = text_features_N  # [N, D]
     text_features_all = text_features_all / text_features_all.norm(dim=-1, keepdim=True)
     with torch.no_grad():
         image_features = model.image_encoder(inputs.type(model.dtype))
@@ -231,18 +233,22 @@ def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target
 def train_target(cfg):
     class_num_hidden = cfg.class_num_hidden
     class_num = cfg.class_num
-    print("ProDe+diff: class_num={}, class_num_hidden={}".format(class_num, class_num_hidden))
+    use_hidden = (class_num_hidden > 0)
+    print("ProDe+diff: class_num={}, class_num_hidden={}, use_hidden={}".format(class_num, class_num_hidden, use_hidden))
 
-    # Must call clip_pre_text first: it sets cfg.classname needed by create_negative_text_features
     text_inputs = clip_pre_text(cfg)
 
-    # Load raw CLIP to create negative text features (used once at init)
-    raw_clip_model, _, _ = clip.load(cfg.ProDe.ARCH)
-    raw_clip_model.float()
-    raw_clip_model.cuda()
-    negative_text_features = create_negative_text_features(cfg, raw_clip_model, class_num_hidden)
-    del raw_clip_model
-    print("Created negative text features: shape =", negative_text_features.shape)
+    # Negative text features only when H>0
+    if use_hidden:
+        raw_clip_model, _, _ = clip.load(cfg.ProDe.ARCH)
+        raw_clip_model.float()
+        raw_clip_model.cuda()
+        negative_text_features = create_negative_text_features(cfg, raw_clip_model, class_num_hidden)
+        del raw_clip_model
+        print("Created negative text features: shape =", negative_text_features.shape)
+    else:
+        negative_text_features = None
+
     dset_loaders = data_load(cfg)
     model = get_coop(cfg.ProDe.ARCH, cfg.SETTING.DATASET, int(cfg.GPU_ID), cfg.ProDe.N_CTX, cfg.ProDe.CTX_INIT)
     for name, param in model.named_parameters():
@@ -257,7 +263,9 @@ def train_target(cfg):
 
     netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
     netC = network.feat_classifier(type='wn', class_num=cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
-    netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num + class_num_hidden, bottleneck_dim=cfg.bottleneck).cuda()
+
+    if use_hidden:
+        netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num + class_num_hidden, bottleneck_dim=cfg.bottleneck).cuda()
 
     modelpath = cfg.output_dir_src + '/source_F.pt'
     netF.load_state_dict(torch.load(modelpath))
@@ -266,17 +274,19 @@ def train_target(cfg):
     modelpath = cfg.output_dir_src + '/source_C.pt'
     netC.load_state_dict(torch.load(modelpath))
 
-    # Initialize netC_aux: copy known class weights, randomly init hidden class weights
-    old_fc = netC.fc
-    new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + class_num_hidden).cuda())
-    with torch.no_grad():
-        new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
-        new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
-        new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
-        if class_num_hidden > 0:
-            torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
-            new_fc.bias.data[cfg.class_num:].zero_()
-    netC_aux.fc = new_fc
+    # Initialize netC_aux only when H>0
+    if use_hidden:
+        old_fc = netC.fc
+        new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + class_num_hidden).cuda())
+        with torch.no_grad():
+            new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
+            new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
+            new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
+            if class_num_hidden > 0:
+                torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
+                new_fc.bias.data[cfg.class_num:].zero_()
+        netC_aux.fc = new_fc
+
     netC.eval()
 
     param_group = []
@@ -296,13 +306,11 @@ def train_target(cfg):
     # netC is frozen (same as ProDe)
     for k, v in netC.named_parameters():
         v.requires_grad = False
-    # netC_aux is trained
-    if class_num_hidden > 0:
+    # netC_aux is trained only when H>0
+    if use_hidden:
         for k, v in netC_aux.named_parameters():
             v.requires_grad = True
             param_group_aux += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
-    else:
-        param_group_aux = []
 
     for k, v in model.prompt_learner.named_parameters():
         if v.requires_grad:
@@ -313,8 +321,10 @@ def train_target(cfg):
     optimizer_ib = optim.SGD(param_group_ib)
     optimizer_ib = op_copy(optimizer_ib)
     optim_state = deepcopy(optimizer_ib.state_dict())
-    opt_aux = optim.SGD(param_group_aux)
-    opt_aux = op_copy(opt_aux)
+
+    if use_hidden:
+        opt_aux = optim.SGD(param_group_aux)
+        opt_aux = op_copy(opt_aux)
 
     model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
 
@@ -322,8 +332,6 @@ def train_target(cfg):
     interval_iter = max_iter // cfg.TEST.INTERVAL
     copy_iter = max_iter // 15 // cfg.TEST.INTERVAL
     iter_num = 0
-    aux_begin = 0.3
-    aux_end = 0
     num_sample = len(dset_loaders["target"].dataset)
     logtis_bank = torch.randn(num_sample, cfg.class_num).cuda()
 
@@ -352,8 +360,8 @@ def train_target(cfg):
         inputs_test = inputs_test.cuda()
         inputs_test_augs = inputs_test_augs[0].cuda()
 
-        # Periodic sync: copy netC weights into netC_aux's first N slots
-        if class_num_hidden > 0 and iter_num % copy_iter == 0:
+        # Periodic sync netC -> netC_aux (only when H>0)
+        if use_hidden and iter_num % copy_iter == 0:
             copy_netC(netC, netC_aux, cfg.class_num)
 
         iter_num += 1
@@ -363,13 +371,14 @@ def train_target(cfg):
         outputs_test = netC(features_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
 
-        # netC_aux forward for IID_loss target
-        outputs_test_aux = netC_aux(features_test)
-        softmax_out_aux = nn.Softmax(dim=1)(outputs_test_aux)
+        if use_hidden:
+            outputs_test_aux = netC_aux(features_test)
+            softmax_out_aux = nn.Softmax(dim=1)(outputs_test_aux)
 
         with torch.no_grad():
             outputs_test_new = outputs_test.clone().detach()
-            outputs_test_aux_new = outputs_test_aux.clone().detach()
+            if use_hidden:
+                outputs_test_aux_new = outputs_test_aux.clone().detach()
 
         # CLIP input selection
         if cfg.ProDe.ARCH == 'RN50':
@@ -377,14 +386,19 @@ def train_target(cfg):
         else:
             inputs_test_clip = inputs_test
 
-        # TTA: use N-class netC output as target (clean, no hidden-class noise)
-        # CLIP forward produces N+H output for the main IID loss below
-        clip_score_NH = test_time_adapt_eval_diff(
+        # TTA with N-class netC target (clean, no hidden-class noise)
+        # When H>0, eval forward produces N+H via clip_forward_extended
+        # When H=0, eval forward produces N-class (same as original ProDe)
+        clip_score = test_time_adapt_eval_diff(
             inputs_test_clip, model, optimizer_ib, optim_state, cfg,
             outputs_test_new, negative_text_features, class_num
         )
-        clip_score_NH = clip_score_NH.float()
-        clip_score_N = clip_score_NH[:, :class_num]  # known classes for pseudo-label
+        clip_score = clip_score.float()
+
+        if use_hidden:
+            clip_score_N = clip_score[:, :class_num]
+        else:
+            clip_score_N = clip_score
 
         # Pseudo-label fusion (same as ProDe, N-class only)
         with torch.no_grad():
@@ -393,16 +407,23 @@ def train_target(cfg):
 
         _, clip_index_new = torch.max(new_clip, 1)
 
-        # Weighted IID loss between netC_aux (N+H) and CLIP (N+H)
-        iic_loss, _ = IID_losses.IID_loss(
-            class_num,
-            softmax_out_aux,
-            clip_score_NH,
-            w_base=1.0,
-            w_aux=1.0,
-            bn=-0.3,
-            lamb=1.0
-        )
+        if use_hidden:
+            # Smooth extension of ProDe: N-class uses fused pseudo-label (identical to ProDe),
+            # H-class uses raw CLIP hidden dims. Model can naturally ignore hidden dims.
+            clip_score_hybrid = torch.cat([clip_score_sm, clip_score[:, class_num:]], dim=1)
+            iic_loss, _ = IID_losses.IID_loss(
+                class_num,
+                softmax_out_aux,
+                clip_score_hybrid,
+                w_base=1.0,
+                w_aux=1.0,
+                bn=-0.3,
+                lamb=1.0
+            )
+        else:
+            # H=0: exact ProDe IID loss — netC output vs fused pseudo-label
+            iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
+
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
 
         msoftmax = softmax_out.mean(dim=0)
@@ -422,11 +443,13 @@ def train_target(cfg):
 
         optimizer.zero_grad()
         optimizer_ib.zero_grad()
-        opt_aux.zero_grad()
+        if use_hidden:
+            opt_aux.zero_grad()
         classifier_loss.backward()
         optimizer.step()
         optimizer_ib.step()
-        opt_aux.step()
+        if use_hidden:
+            opt_aux.step()
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()

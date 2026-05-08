@@ -19,7 +19,7 @@ TEST:
   INTERVAL: 30
 ProDe:
   EPSILON : 1e-5
-  GENT_PAR: 0.4
+  GENT_PAR: 1.0
   ARCH : ViT-B/32
   TTA_STEPS : 1
   CTX_INIT : a_photo_of_a
