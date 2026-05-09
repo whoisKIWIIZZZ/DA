@@ -16,6 +16,7 @@ import src.methods.net.ProDe as ProDe
 import src.methods.net.plue as PLUE
 import src.methods.net.adacontrast as ADACONTRAST
 import src.methods.net.source as SOURCE
+import src.methods.net.diff_new_opt_new as DIFF_NEW_OPT_NEW
 from conf import cfg, load_cfg_from_args
 
 
@@ -95,7 +96,11 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "source":
         print("training source model")
         acc = SOURCE.train_source(cfg)
-    
+
+    elif cfg.MODEL.METHOD == "diff_new_opt_new":
+        print("using diff_new_opt_new method")
+        acc = DIFF_NEW_OPT_NEW.train_target(cfg)
+
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))

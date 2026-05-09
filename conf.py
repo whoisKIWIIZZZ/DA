@@ -378,23 +378,28 @@ def load_cfg_from_args():
         cfg.domain = ['target']
         cfg.class_num = 200
         cfg.bottleneck = 2048
+        cfg.class_num_hidden = 30
     if cfg.SETTING.DATASET == 'imagenet_r':
         cfg.domain = ['target']
         cfg.class_num = 200
         cfg.bottleneck = 2048
+        cfg.class_num_hidden = 30
     if cfg.SETTING.DATASET == 'imagenet_k':
         cfg.domain = ['target']
         cfg.class_num = 1000
         cfg.bottleneck = 2048
+        cfg.class_num_hidden = 100
     if cfg.SETTING.DATASET == 'imagenet_v':
         cfg.domain = ['target']
         cfg.class_num = 1000
         cfg.bottleneck = 2048
+        cfg.class_num_hidden = 100
     if cfg.SETTING.DATASET == 'domainnet126':
         cfg.domain = ["clipart", "painting", "real", "sketch"]
         cfg.name_file = './data/domainnet126/classname.txt'
         cfg.class_num = 126
         cfg.bottleneck = 256
+        cfg.class_num_hidden = 30
 
     cfg.output_dir_src = os.path.join(cfg.CKPT_DIR,cfg.SETTING.OUTPUT_SRC,cfg.DA,cfg.SETTING.DATASET,cfg.domain[cfg.SETTING.S][0].upper())
     #cfg.output_dir_src = os.path.join()
