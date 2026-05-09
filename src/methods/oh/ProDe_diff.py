@@ -202,31 +202,74 @@ def clip_forward_extended(model, inputs, negative_text_features):
     return logits, text_features_all
 
 
-def test_time_tuning_diff(model, inputs, optimizer, cfg, target_output):
+def test_time_tuning_diff(model, inputs, optimizer, cfg, target_output,
+                          hidden_text_features=None, hidden_optimizer=None, hidden_target=None):
     """
-    TTA inner loop with N-class target from netC (clean, no hidden class noise).
-    Uses standard IID_loss_old like original ProDe.
+    TTA inner loop. When hidden_text_features is provided, also adapts H-class
+    text features to match netC_aux's H-class output.
     """
     target_output = target_output.cuda()
     target_output = nn.Softmax(dim=1)(target_output)
+    use_hidden_tta = hidden_text_features is not None
+
     for j in range(cfg.ProDe.TTA_STEPS):
         with torch.amp.autocast('cuda'):
-            output_logits, _ = model(inputs)
-            output = nn.Softmax(dim=1)(output_logits)
-            iic_loss = IID_losses.IID_loss_old(output, target_output)
+            if use_hidden_tta:
+                image_features = model.image_encoder(inputs.type(model.dtype))
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                text_features_N = model.get_text_features()
+                text_features_all = torch.cat([text_features_N, hidden_text_features], dim=0)
+                text_features_all = text_features_all / text_features_all.norm(dim=-1, keepdim=True)
+                logit_scale = model.logit_scale.exp()
+                logits_all = logit_scale * image_features @ text_features_all.t()
+                N_cls = text_features_N.shape[0]
+                output_N = nn.Softmax(dim=1)(logits_all[:, :N_cls])
+                output_H = nn.Softmax(dim=1)(logits_all[:, N_cls:])
+                iic_loss_N = IID_losses.IID_loss_old(output_N, target_output)
+                iic_loss_H = IID_losses.IID_loss_old(output_H, nn.Softmax(dim=1)(hidden_target))
+                iic_loss = iic_loss_N + iic_loss_H
+            else:
+                output_logits, _ = model(inputs)
+                output = nn.Softmax(dim=1)(output_logits)
+                iic_loss = IID_losses.IID_loss_old(output, target_output)
+
         optimizer.zero_grad()
+        if use_hidden_tta:
+            hidden_optimizer.zero_grad()
         iic_loss.backward()
         optimizer.step()
-    return output
+        if use_hidden_tta:
+            hidden_optimizer.step()
+
+    if use_hidden_tta:
+        with torch.no_grad():
+            image_features = model.image_encoder(inputs.type(model.dtype))
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features_N = model.get_text_features()
+            text_features_all = torch.cat([text_features_N, hidden_text_features], dim=0)
+            text_features_all = text_features_all / text_features_all.norm(dim=-1, keepdim=True)
+            logit_scale = model.logit_scale.exp()
+            logits_all = logit_scale * image_features @ text_features_all.t()
+            return nn.Softmax(dim=1)(logits_all[:, :text_features_N.shape[0]])
+    else:
+        return output
 
 
-def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target_output, negative_text_features, N):
+def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target_output, negative_text_features, N,
+                               hidden_text_features=None, hidden_optimizer=None, hidden_optim_state=None, hidden_target=None):
     optimizer.load_state_dict(optim_state)
-    test_time_tuning_diff(model, inputs, optimizer, cfg, target_output)
+    if hidden_optimizer is not None:
+        hidden_optimizer.load_state_dict(hidden_optim_state)
+    test_time_tuning_diff(model, inputs, optimizer, cfg, target_output,
+                          hidden_text_features=hidden_text_features,
+                          hidden_optimizer=hidden_optimizer,
+                          hidden_target=hidden_target)
     with torch.no_grad():
         with torch.amp.autocast('cuda'):
             model.eval()
-            output_logits, _ = clip_forward_extended(model, inputs, negative_text_features)
+            # Use learnable H features (updated by TTA) if available, else frozen
+            h_features = hidden_text_features if hidden_text_features is not None else negative_text_features
+            output_logits, _ = clip_forward_extended(model, inputs, h_features)
     # Return logits (same as ProDe). Pseudo-label fusion needs logits for
     # discriminative power; softmax would flatten the CLIP signal.
     return output_logits
@@ -248,8 +291,11 @@ def train_target(cfg):
         negative_text_features = create_negative_text_features(cfg, raw_clip_model, class_num_hidden)
         del raw_clip_model
         print("Created negative text features: shape =", negative_text_features.shape)
+        # Learnable H-class text features for TTA (initialized from frozen negative features)
+        hidden_text_features = nn.Parameter(negative_text_features.clone().detach())
     else:
         negative_text_features = None
+        hidden_text_features = None
 
     dset_loaders = data_load(cfg)
     model = get_coop(cfg.ProDe.ARCH, cfg.SETTING.DATASET, int(cfg.GPU_ID), cfg.ProDe.N_CTX, cfg.ProDe.CTX_INIT)
@@ -338,6 +384,9 @@ def train_target(cfg):
     if use_hidden:
         opt_aux = optim.SGD(param_group_aux)
         opt_aux = op_copy(opt_aux)
+        hidden_optimizer_ib = optim.SGD([hidden_text_features], lr=cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1)
+        hidden_optimizer_ib = op_copy(hidden_optimizer_ib)
+        hidden_optim_state = deepcopy(hidden_optimizer_ib.state_dict())
 
     model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
 
@@ -399,11 +448,20 @@ def train_target(cfg):
         else:
             inputs_test_clip = inputs_test
 
+        # Prepare H-class TTA target (raw logits from netC_aux H dims)
+        hidden_target = None
+        if use_hidden:
+            hidden_target = outputs_test_aux_new[:, class_num:]
+
         # clip_score is logits (same as ProDe test_time_adapt_eval).
         # Pseudo-label fusion needs logits for discriminative power.
         clip_score = test_time_adapt_eval_diff(
             inputs_test_clip, model, optimizer_ib, optim_state, cfg,
-            outputs_test_new, negative_text_features, class_num
+            outputs_test_new, negative_text_features, class_num,
+            hidden_text_features=hidden_text_features,
+            hidden_optimizer=hidden_optimizer_ib,
+            hidden_optim_state=hidden_optim_state,
+            hidden_target=hidden_target
         )
         clip_score = clip_score.float()
 
