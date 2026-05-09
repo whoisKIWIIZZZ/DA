@@ -2,7 +2,7 @@
 *.pt
 
 *.out
-
+*.zip
 Datasets/
 
 Models/

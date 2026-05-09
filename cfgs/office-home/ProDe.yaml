@@ -20,7 +20,7 @@ TEST:
 ProDe:
   EPSILON : 1e-5
   GENT_PAR: 0.4
-  ARCH : ViT-B/16
+  ARCH : ViT-B/32
   TTA_STEPS : 1
   CTX_INIT : a_photo_of_a
   N_CTX : 4
