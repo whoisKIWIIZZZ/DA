@@ -553,8 +553,18 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             test_clip_all_output = CLIP_model_eval(dset_loaders['clip_test'], text_inputs, text_features, clip_model,cfg)
             # 分析模型重叠
             #cal_satistical_info(dset_loaders['clip_test'], netF, netB, netC, test_clip_all_output,cfg, flag=False)
-            confi_imag, confi_dis, _, target_score_bank = obtain_label(dset_loaders['test'], netF, netB, netC, text_inputs, text_features, clip_model)
-            target_score_bank = target_score_bank.cuda()
+            target_score_bank = torch.zeros(num_sample).cuda()
+            with torch.no_grad():
+                test_iter = iter(dset_loaders["test"])
+                for _ in range(len(dset_loaders["test"])):
+                    test_data = next(test_iter)
+                    test_inputs = test_data[0][0]
+                    test_indx = test_data[-1]
+                    test_inputs = test_inputs.cuda()
+                    test_outputs = netC(netB(netF(test_inputs)))
+                    test_softmax = nn.Softmax(dim=1)(test_outputs)
+                    test_scores = -torch.sum(test_softmax * torch.log(test_softmax + 1e-9), dim=1)
+                    target_score_bank[test_indx] = test_scores
             netF.train()
             netB.train()
             netC.train()
@@ -786,59 +796,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         )
 
     return netF, netB, netC
-
-
-def obtain_label(loader, netF, netB, netC, text_inputs, text_features, clip_model):
-    start_test = True
-    with torch.no_grad():
-        iter_test = iter(loader)
-        for _ in range(len(loader)):
-            data = next(iter_test)
-            inputs = data[0][0]
-            inputs_clip = data[0][1]
-            labels = data[1]
-            inputs = inputs.cuda()
-            inputs_clip = inputs_clip.cuda()
-            feas = netB(netF(inputs))
-            outputs = netC(feas)
-
-            output_soft = nn.Softmax(dim=1)(outputs)
-            scores = -torch.sum(output_soft * torch.log(output_soft + 1e-9), dim=1)
-
-            if (text_features != None):
-                clip_score = clip_text(clip_model, text_features, inputs_clip)
-            else:
-                clip_score, _ = clip_model(inputs_clip, text_inputs)
-
-            clip_score = clip_score.cpu()
-            scores = scores.cpu()
-
-            if start_test:
-                all_output = outputs.float().cpu()
-                all_clip_score = clip_score.float().cpu()
-                all_label = labels.float().cpu()
-                all_scores = scores.float().cpu()
-                start_test = False
-            else:
-                all_output = torch.cat((all_output, outputs.float().cpu()), 0)
-                all_label = torch.cat((all_label, labels.float()), 0)
-                all_clip_score = torch.cat((all_clip_score, clip_score.float()), 0)
-                all_scores = torch.cat((all_scores, scores.float()), 0)
-
-    clip_all_output = nn.Softmax(dim=1)(all_clip_score).cpu()
-    _, predict_clip = torch.max(clip_all_output, 1)
-    accuracy_clip = torch.sum(torch.squeeze(predict_clip).float() == all_label).item() / float(all_label.size()[0])
-
-    all_output = nn.Softmax(dim=1)(all_output)
-    _, predict = torch.max(all_output, 1)
-    all_mix_output = (all_output + clip_all_output) / 2
-
-    confi_dis = all_mix_output.detach()
-    confi_imag = loader.dataset.imgs
-    accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
-    log_str = 'Accuracy = {:.2f}% -> CLIP_Accuracy  = {:.2f}%'.format(accuracy * 100, accuracy_clip * 100)
-    logging.info(log_str)
-    return confi_imag, confi_dis, clip_all_output, all_scores
 
 
 def print_cfg(cfg):
