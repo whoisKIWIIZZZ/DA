@@ -345,7 +345,7 @@ def print_cfg(cfg):
     return s
 
 
-def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = True,use_clip = True,aux_begin=0.5):
+def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = True,use_clip = True,aux_begin=0.3):
     print("using the new opt file")
     print("iid:{},cls:{},clip:{}".format(use_iid,use_cls,use_clip))
     acc = 0
@@ -527,12 +527,13 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
         current_aux = aux_begin + (aux_end - aux_begin) * (iter_num / max_iter)
         try:
-            (inputs_test, _), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_clip), _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, _), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_clip), _, tar_idx = next(iter_test)
 
         inputs_test = inputs_test.cuda()
+        inputs_clip = inputs_clip.cuda()
         
         if inputs_test.size(0) == 1:
             continue
@@ -571,9 +572,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             netC_aux.train()
 
 
-        logit_clip_score, text_features = mypromt(inputs_test)
+        logit_clip_score, text_features = mypromt(inputs_clip)
         text_features_all = text_features
-        logit_clip_score_include_hidden = clip_text(clip_model, text_features_all,inputs_test)
+        logit_clip_score_include_hidden = clip_text(clip_model, text_features_all, inputs_clip)
         
         # trainable_param = deepcopy(mypromt.prompt_learner.ctx)
 
