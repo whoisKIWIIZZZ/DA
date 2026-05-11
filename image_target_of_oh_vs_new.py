@@ -28,6 +28,7 @@ import src.methods.oh.plue as PLUE
 import src.methods.oh.adacontrast as ADACONTRAST
 import src.methods.oh.source as SOURCE
 import src.utils.plot as PLOT
+import src.methods.oh.difo_plus as DIFO_PLUS
 from conf import cfg, load_cfg_from_args
 from setproctitle import setproctitle
 import warnings
@@ -177,6 +178,9 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "draw":
         print("yes")
         acc = DRAW_VISDA.train_target(cfg)
+    elif cfg.MODEL.METHOD == "difo_plus":
+        print("using difo_plus method")
+        acc = DIFO_PLUS.train_target(cfg)
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))

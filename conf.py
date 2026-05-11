@@ -299,7 +299,21 @@ _C.ProDe.REP_PAR = 0.1
 _C.ProDe.REP_TOPK = 5
 _C.ProDe.LOAD = None
 
+# --------------------------------- DIFO++ options ----------------------------- #
+_C.DIFOPLUS = CfgNode()
 
+_C.DIFOPLUS.CLS_PAR = 0.4
+_C.DIFOPLUS.ENT = True
+_C.DIFOPLUS.GENT = True
+_C.DIFOPLUS.EPSILON = 1e-5
+_C.DIFOPLUS.GENT_PAR = 1.0
+_C.DIFOPLUS.CTX_INIT = 'a_photo_of_a' #initialize context 
+_C.DIFOPLUS.N_CTX = 4 
+_C.DIFOPLUS.ARCH = 'ViT-B/32' #['RN50', 'ViT-B/32','RN101','ViT-B/16']
+_C.DIFOPLUS.TTA_STEPS = 1
+_C.DIFOPLUS.IIC_PAR = 1.0
+_C.DIFOPLUS.LOAD = None
+_C.DIFOPLUS.LENT_PAR = 0.05
 # --------------------------------- CUDNN options --------------------------- #
 _C.CUDNN = CfgNode()
 
