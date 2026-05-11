@@ -344,7 +344,7 @@ def print_cfg(cfg):
     return s
 
 
-def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = True,use_clip = True,aux_begin=0.3):
+def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = True,use_clip = True,aux_begin=0.5):
     print("using the new opt file")
     print("iid:{},cls:{},clip:{}".format(use_iid,use_cls,use_clip))
     acc = 0
@@ -354,7 +354,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     beta_pre_1 = beta_pre_1
     beta_pre_2 = beta_pre_2# 原是0.2
     aux_begin = aux_begin
-    aux_end = 0
+    aux_end = 0.1
    
     print("aux_begin:", aux_begin, "aux_end:", aux_end)
     print("is_merge_stratg_use",
