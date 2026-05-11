@@ -28,6 +28,7 @@ DIFF_ALIGN:
   LOAD : None
   IIC_PAR: 1.0
   USE_NEG: True
+  LENT_PAR : 0.05
 
 
 

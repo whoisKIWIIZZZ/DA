@@ -21,6 +21,7 @@ import src.methods.oh.ProDe as ProDe
 import src.methods.oh.ProDe_diff as ProDe_diff
 import src.methods.oh.diff_new_opt_new_50 as DIFF_ALIGN_50
 import src.methods.oh.diff_new_opt_new as DIFF_ALIGN
+import src.methods.oh.diff_new_opt_new_plus as DIFF_ALIGN_PLUS
 import src.methods.oh.draw_visda as DRAW_VISDA
 import src.methods.oh.source_clip as SOURCE_CLIP
 import src.methods.oh.source_neg as SOURCE_NEG
@@ -157,7 +158,7 @@ if __name__ == "__main__":
             print("RN")
             acc = DIFF_ALIGN_50.train_target(cfg)
         else:
-            acc = DIFF_ALIGN.train_target(cfg)
+            acc = DIFF_ALIGN_PLUS.train_target(cfg)
         # print("==================not use CLS===================================")
         # acc = DIFF_ALIGN.train_target(cfg,beta_pre_1 = 1,beta_pre_2 =0.1,use_iid = True,use_cls=False,use_clip = True)
         # print("==================not use IID===================================")
