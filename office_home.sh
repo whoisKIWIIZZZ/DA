@@ -1,6 +1,6 @@
 #!/bin/bash
 DATASET="office-home" # imagenet_c domainnet126 office-home
-METHOD="ProDe_diff"          # shot nrc plue difo source-neg source_clip
+METHOD="difo_plus"          # shot nrc plue difo source-neg source_clip
 
 echo DATASET: $DATASET
 echo METHOD: $METHOD

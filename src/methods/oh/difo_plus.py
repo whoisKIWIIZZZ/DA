@@ -7,7 +7,7 @@ from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
 from src.models import network
 from torch.utils.data import DataLoader
-from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix
+from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
 from sklearn.metrics import confusion_matrix
 import clip
 from src.utils.utils import *
@@ -40,9 +40,9 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
-    dsets["target"] = ImageList_idx_aug_fix(txt_tar, transform=image_train())
+    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["test"] = ImageList_idx_aug_fix(txt_test, transform=image_test())
+    dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
@@ -257,7 +257,7 @@ def train_target(cfg):
             classifier_loss = torch.tensor(0.0).cuda()
 
         hh = clip_all_output[tar_idx]
-        iic_loss = IID_losses.IID_loss(softmax_out[indices_greater], hh[indices_greater])
+        iic_loss = IID_losses.IID_loss_old(softmax_out[indices_greater], hh[indices_greater])
         classifier_loss = classifier_loss + cfg.DIFOPLUS.IIC_PAR * iic_loss + cfg.DIFOPLUS.LENT_PAR * loss_ent
 
         msoftmax = softmax_out.mean(dim=0)

@@ -1,6 +1,6 @@
 MODEL:
   ARCH: resnet50
-  METHOD: difoplus
+  METHOD: difo_plus
 SETTING:
   DATASET: office-home
   S: 0
