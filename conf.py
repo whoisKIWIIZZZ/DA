@@ -282,7 +282,7 @@ _C.DIFF_ALIGN.NUM_BG = 5
 _C.DIFF_ALIGN.NUM_SUBCLASS = 5
 _C.DIFF_ALIGN.NUM_CLASS_HIDDEN = 10
 _C.DIFF_ALIGN.USE_NEG = True
-
+_C.DIFF_ALIGN.LENT_PAR = 0.05
 # --------------------------------- ProDe options ----------------------------- #
 _C.ProDe = CfgNode()
 

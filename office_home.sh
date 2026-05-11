@@ -1,6 +1,6 @@
 #!/bin/bash
 DATASET="office-home" # imagenet_c domainnet126 office-home
-METHOD="difo_plus"          # shot nrc plue difo source-neg source_clip
+METHOD="diff_align"          # shot nrc plue difo source-neg source_clip
 
 echo DATASET: $DATASET
 echo METHOD: $METHOD
@@ -8,8 +8,8 @@ echo METHOD: $METHOD
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
-s_list=(0)
-t_list=(1)
+s_list=(1 2 0 3)
+t_list=(0 1 2 3)
 # fji
 for s in ${s_list[*]}; do
     for t in ${t_list[*]}; do
