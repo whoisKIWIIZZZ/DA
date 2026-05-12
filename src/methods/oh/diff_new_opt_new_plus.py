@@ -662,15 +662,15 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             targets = predict_mix[indices_greater]
             outputs_log_softmax = base_outputs_test[indices_greater]
             pseudo_label_loss = (- targets * outputs_log_softmax).sum(dim=1).mean()
-            if cfg.SETTING.DATASET == 'VISDA-C':
-                if iter_num < 3000:
-                    cls_par = 0.25
-                elif iter_num< 6000:
-                    cls_par = 0.3
-                else:
-                    cls_par = 0.4
-            else:
-                cls_par = 0.4
+            # if cfg.SETTING.DATASET == 'VISDA-C':
+            #     if iter_num < 3000:
+            #         cls_par = 0.25
+            #     elif iter_num< 6000:
+            #         cls_par = 0.3
+            #     else:
+            #         cls_par = 0.4
+            # else:
+            #     cls_par = 0.4
             classifier_loss = pseudo_label_loss * 0.4
         else:
             classifier_loss = torch.tensor(0.0).cuda()
@@ -703,7 +703,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         
         # print("="*30 + "\n")
         m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux
+        loss_iid = loss_aux*1.5
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
