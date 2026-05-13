@@ -420,7 +420,7 @@ def train_target(cfg):
             continue
 
         inputs_test = inputs_test.cuda()
-        inputs_test_augs = inputs_test_augs[0].cuda()
+        inputs_test_augs = inputs_test_augs.cuda()
 
         # Periodic sync netC -> netC_aux (only when H>0)
         if use_hidden and iter_num % copy_iter == 0:
