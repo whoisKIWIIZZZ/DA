@@ -17,6 +17,7 @@ import src.methods.net.plue as PLUE
 import src.methods.net.adacontrast as ADACONTRAST
 import src.methods.net.source as SOURCE
 import src.methods.net.diff_new_opt_new as DIFF_NEW_OPT_NEW
+import src.methods.net.diff_new_opt_new_plus as DIFF_NEW_OPT_NEW_PLUS
 from conf import cfg, load_cfg_from_args
 
 
@@ -100,6 +101,10 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "diff_new_opt_new":
         print("using diff_new_opt_new method")
         acc = DIFF_NEW_OPT_NEW.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "diff_align_plus":
+        print("using diff_align_plus method")
+        acc = DIFF_NEW_OPT_NEW_PLUS.train_target(cfg)
 
 
     end = time.time()

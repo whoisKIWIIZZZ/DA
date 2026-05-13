@@ -244,7 +244,7 @@ def data_load_net(cfg):
                                             shuffle=False,
                                             workers=cfg.NUM_WORKERS)
 
-    dset_loaders["clip_test"] = get_test_loader(adaptation=cfg.ADAPTATION,
+    dset_loaders["clip_test"] = get_test_loader_aug(adaptation=cfg.ADAPTATION,
                                                  dataset_name=cfg.SETTING.DATASET,
                                                  root_dir=cfg.DATA_DIR,
                                                  domain_name=domain_name,
@@ -397,17 +397,16 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
         current_aux = aux_begin + (aux_end - aux_begin) * (iter_num / max_iter)
         try:
             if is_imagenet:
-                # net-style flat unpacking: (inputs, augs, labels, index)
-                inputs_test, inputs_clip_raw, _, tar_idx = next(iter_test)
-                inputs_clip = inputs_clip_raw[0] if isinstance(inputs_clip_raw, (list, tuple)) else inputs_clip_raw
+                # net-style: dataset returns (img_1, img_2, label, idx)
+                # img_1 = base model view, img_2 = CLIP-preprocessed view
+                inputs_test, inputs_clip, _, tar_idx = next(iter_test)
             else:
-                # oh-style nested unpacking: ((inputs, augs), labels, index)
+                # oh-style: dataset returns ((img_base, img_clip), label, idx)
                 (inputs_test, inputs_clip), _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
             if is_imagenet:
-                inputs_test, inputs_clip_raw, _, tar_idx = next(iter_test)
-                inputs_clip = inputs_clip_raw[0] if isinstance(inputs_clip_raw, (list, tuple)) else inputs_clip_raw
+                inputs_test, inputs_clip, _, tar_idx = next(iter_test)
             else:
                 (inputs_test, inputs_clip), _, tar_idx = next(iter_test)
 
@@ -427,7 +426,33 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
             netC.eval()
             netC_aux.eval()
             epoch_num = int(iter_num / interval_iter)
-            test_clip_all_output = CLIP_model_eval(dset_loaders['clip_test'], text_inputs, text_features, clip_model, cfg)
+            # Inline CLIP evaluation: oh data = (img, label, idx), net data = (img_1, img_2, label, idx)
+            start_clip_eval = True
+            with torch.no_grad():
+                clip_eval_iter = iter(dset_loaders["clip_test"])
+                for _ in range(len(dset_loaders["clip_test"])):
+                    clip_data = next(clip_eval_iter)
+                    if is_imagenet:
+                        clip_inputs = clip_data[1]
+                        clip_labels = clip_data[2]
+                    else:
+                        clip_inputs = clip_data[0]
+                        clip_labels = clip_data[1]
+                    clip_inputs = clip_inputs.cuda()
+                    if text_features is not None:
+                        clip_score = clip_text(clip_model, text_features, clip_inputs)
+                    else:
+                        clip_score, _ = clip_model(clip_inputs, text_inputs)
+                    clip_score = clip_score.cpu()
+                    if start_clip_eval:
+                        all_clip_score = clip_score.float().cpu()
+                        all_label = clip_labels.float().cpu()
+                        start_clip_eval = False
+                    else:
+                        all_label = torch.cat((all_label, clip_labels.float()), 0)
+                        all_clip_score = torch.cat((all_clip_score, clip_score.float()), 0)
+                all_clip_score = all_clip_score[:, :cfg.class_num]
+                test_clip_all_output = nn.Softmax(dim=1)(all_clip_score).cpu()
             target_score_bank = torch.zeros(num_sample).cuda()
             with torch.no_grad():
                 test_iter = iter(dset_loaders["test"])

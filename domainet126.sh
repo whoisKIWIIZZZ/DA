@@ -1,6 +1,6 @@
 #!/bin/sh
 DATASET="domainnet126" # imagenet_c domainnet126 officehome
-METHOD="diff_new_opt_new"          # shot nrc plue difo
+METHOD="diff_new_opt_new"          # shot nrc plue difo ProDe diff_align_plus
 
 echo DATASET: $DATASET
 echo METHOD: $METHOD
