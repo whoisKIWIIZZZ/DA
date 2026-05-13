@@ -45,9 +45,9 @@ def data_load(cfg):
         txt_test = txt_tar.copy()
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["test"] = ImageList_idx(txt_test, transform=image_test())
+    dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["source"] = ImageList_idx(txt_test, transform=image_test())
+    dsets["source"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["source"] = DataLoader(dsets["source"], batch_size=2, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=True)
     return dset_loaders
 
@@ -87,7 +87,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
             labels = data[1]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
@@ -125,7 +125,7 @@ def cal_clip_acc(loader, model, negative_text_features, N):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][1]
             labels = data[1]
             inputs = inputs.cuda()
             logits, _ = clip_forward_extended(model, inputs, negative_text_features)
@@ -402,7 +402,7 @@ def train_target(cfg):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
             indx = data[-1]
             inputs = inputs.cuda()
             output = netB(netF(inputs))
@@ -442,11 +442,8 @@ def train_target(cfg):
             if use_hidden:
                 outputs_test_aux_new = outputs_test_aux.clone().detach()
 
-        # CLIP input selection
-        if cfg.ProDe.ARCH == 'RN50':
-            inputs_test_clip = inputs_test_augs
-        else:
-            inputs_test_clip = inputs_test
+        # CLIP input selection: always use aug view (CLIP preprocessing)
+        inputs_test_clip = inputs_test_augs
 
         # Prepare H-class TTA target (raw logits from netC_aux H dims)
         hidden_target = None
