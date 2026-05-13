@@ -18,7 +18,7 @@ from src.data.datasets.data_loading import get_test_loader, get_test_loader_aug
 from src.data.datasets.imagenet_subsets import IMAGENET_A_MASK, IMAGENET_R_MASK, IMAGENET_V_MASK
 from data.imagnet_prompts import imagenet_classes
 from src.models.model import get_model, ImageNetXWrapper
-
+from src.utils.loss import entropy
 logger = logging.getLogger(__name__)
 
 import copy
