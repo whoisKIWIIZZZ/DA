@@ -682,7 +682,12 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         #overclustering
         bb = 1- current_aux
         nnn = 1-current_aux if iter_num > neg_iter else 0.01
-        bn = -0.3
+        bn = -0.2
+        # dynamic bb: harder batch (higher source entropy) -> stronger known-class IID alignment
+        if indices_greater.numel() > 0:
+            avg_source_ent = current_batch_scores[indices_greater].mean()
+            ent_factor = torch.clamp(avg_source_ent / 2.0, 0.6, 1.4)
+            bb = bb * ent_factor.item()
         # sample-level weighting: hard samples (high source entropy) contribute more to p_i_j
         sample_w = None
         if indices_greater.numel() > 0:
@@ -694,7 +699,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             clip_all_output[indices_greater],
             bb,
             nnn,
-            bn,#[CLS] - not a [CLS]
+            bn,
             lamb = 1.0,
             sample_weights = sample_w
         )

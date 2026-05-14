@@ -74,11 +74,12 @@ def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, E
   loss = - p_i_j * (torch.log(p_i_j) \
                     - lamb * torch.log(p_j) \
                     - lamb * torch.log(p_i))
- # w_base: base, w_aux:neg , w_cross: *
-  #w_cross = -0.2 + w_aux
-  w_cross = 0.45
-  weight_matrix = torch.full((k, k), w_cross, device=x_out.device)
-  weight_matrix[N:,N:] = w_aux - 0.2
+ # w_base: known-known diagonal (dynamic, driven by source entropy)
+  # w_aux:  unknown-unknown diagonal
+  # bn:     unknown-unknown off-diagonal penalty (negative = discourage confusion)
+  # 0.45:   known-known off-diagonal and cross-region weight
+  weight_matrix = torch.full((k, k), 0.45, device=x_out.device)
+  weight_matrix[N:,N:] = w_aux + bn
   weight_matrix[:N,:N] = 0.45
   for i in range(N):
        weight_matrix[i,i] = w_base
