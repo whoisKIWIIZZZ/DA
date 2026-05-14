@@ -49,17 +49,17 @@ def IID_loss_old(x_out, x_tf_out, lamb=1.0, EPS=sys.float_info.epsilon):
 
 
 
-def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, EPS=sys.float_info.epsilon):
+def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, EPS=sys.float_info.epsilon):
   # has had softmax applied
   _, k = x_out.size()
 
   bn_, k_ = x_out.size()
   assert (x_tf_out.size(0) == bn_ and x_tf_out.size(1) == k_)
-  su_temp1 = x_out.unsqueeze(2)
-  su_temp2 = x_tf_out.unsqueeze(1)
-  p_i_j = x_out.unsqueeze(2) * x_tf_out.unsqueeze(1)  # bn, k, k #这两个相乘有什么用？
+  p_i_j = x_out.unsqueeze(2) * x_tf_out.unsqueeze(1)  # bn, k, k
+  if sample_weights is not None:
+      p_i_j = p_i_j * sample_weights.view(-1, 1, 1)
   p_i_j = p_i_j.sum(dim=0)  # k, k
-  p_i_j = (p_i_j + p_i_j.t()) / 2.  # symmetrise 为什么要对称
+  p_i_j = (p_i_j + p_i_j.t()) / 2.  # symmetrise
   p_i_j = p_i_j / p_i_j.sum()  # normalise
 
   assert (p_i_j.size() == (k, k))

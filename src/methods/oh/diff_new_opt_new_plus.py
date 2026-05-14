@@ -683,6 +683,11 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         bb = 1- current_aux
         nnn = 1-current_aux if iter_num > neg_iter else 0.01
         bn = -0.3
+        # sample-level weighting: hard samples (high source entropy) contribute more to p_i_j
+        sample_w = None
+        if indices_greater.numel() > 0:
+            sample_w = current_batch_scores[indices_greater].clone().detach()
+            sample_w = sample_w / (sample_w.sum() + 1e-9) * sample_w.numel()
         loss_aux,loss_mat = IID_losses.IID_loss(
             cfg.class_num,
             softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
@@ -690,7 +695,8 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             bb,
             nnn,
             bn,#[CLS] - not a [CLS]
-            lamb = 1.0
+            lamb = 1.0,
+            sample_weights = sample_w
         )
 
 
