@@ -30,6 +30,10 @@ import src.methods.oh.adacontrast as ADACONTRAST
 import src.methods.oh.source as SOURCE
 import src.utils.plot as PLOT
 import src.methods.oh.difo_plus as DIFO_PLUS
+import src.methods.oh.difo_plus_partial as DIFO_PLUS_PARTIAL
+import src.methods.oh.difo_plus_open as DIFO_PLUS_OPEN
+import src.methods.oh.ProDe_partial as PRODE_PARTIAL
+import src.methods.oh.ProDe_open as PRODE_OPEN
 from conf import cfg, load_cfg_from_args
 from setproctitle import setproctitle
 import warnings
@@ -74,6 +78,13 @@ if __name__ == "__main__":
             cfg.class_num = 65
             cfg.src_classes = [i for i in range(65)]
             cfg.tar_classes = [i for i in range(25)]
+        elif cfg.DA == 'open':
+            cfg.class_num = 26
+            cfg.src_classes = [i for i in range(25)]
+            cfg.tar_classes = [i for i in range(65)]
+        # pda/open use the closed-set (uda) source model
+        if cfg.DA in ('pda', 'open'):
+            cfg.output_dir_src = cfg.output_dir_src.replace('/' + cfg.DA + '/', '/uda/')
 
     if cfg.MODEL.METHOD == "nrc":
         print("using nrc method")
@@ -182,6 +193,22 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "difo_plus":
         print("using difo_plus method")
         acc = DIFO_PLUS.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "difo_plus_partial":
+        print("using difo_plus_partial method")
+        acc = DIFO_PLUS_PARTIAL.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "difo_plus_open":
+        print("using difo_plus_open method")
+        acc = DIFO_PLUS_OPEN.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "ProDe_partial":
+        print("using ProDe_partial method")
+        acc = PRODE_PARTIAL.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "ProDe_open":
+        print("using ProDe_open method")
+        acc = PRODE_OPEN.train_target(cfg)
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))

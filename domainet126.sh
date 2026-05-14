@@ -1,6 +1,6 @@
 #!/bin/sh
 DATASET="domainnet126" # imagenet_c domainnet126 officehome
-METHOD="diff_new_opt_new"          # shot nrc plue difo ProDe diff_align_plus
+METHOD="diff_align"          # shot nrc plue difo ProDe diff_align_plus
 
 echo DATASET: $DATASET
 echo METHOD: $METHOD
@@ -8,8 +8,8 @@ echo METHOD: $METHOD
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
-s_list=(0 1 2 3)
-t_list=(0 1 2 3)
+s_list=(0)
+t_list=(1)
 # fi
 for s in ${s_list[*]}; do
     for t in ${t_list[*]}; do

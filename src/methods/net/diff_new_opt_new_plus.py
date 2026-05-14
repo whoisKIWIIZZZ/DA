@@ -288,8 +288,6 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
     if is_net:
         cfg.ADAPTATION = 'tent'
         dset_loaders = data_load_net(cfg)
-    else:
-        dset_loaders = data_load_oh(cfg)
 
     # Model architecture
     print("using the arch:", cfg.MODEL.ARCH, "+++++++++++++++++++++++++++++")
@@ -313,40 +311,6 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
                 torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in',
                                                nonlinearity='linear')
                 new_fc.bias.data[cfg.class_num:].zero_()
-    else:
-        # Oh-style: netF + netB + netC + netC_aux
-        if cfg.MODEL.ARCH[0:3] == 'res':
-            netF = network.ResBase(res_name=cfg.MODEL.ARCH).cuda()
-        elif cfg.MODEL.ARCH[0:3] == 'vgg':
-            netF = network.VGGBase(vgg_name=cfg.MODEL.ARCH).cuda()
-
-        netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
-        netC = network.feat_classifier(type='wn', class_num=cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
-        netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num + cfg.class_num_hidden,
-                                            bottleneck_dim=cfg.bottleneck).cuda()
-
-        # Load source weights (oh-style files)
-        modelpath = cfg.output_dir_src + '/source_F.pt'
-        netF.load_state_dict(torch.load(modelpath), strict=True)
-        modelpath = cfg.output_dir_src + '/source_B.pt'
-        netB.load_state_dict(torch.load(modelpath), strict=True)
-        modelpath = cfg.output_dir_src + '/source_C.pt'
-        netC.load_state_dict(torch.load(modelpath))
-
-        # Initialize netC_aux from netC
-        old_fc = netC.fc
-        new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + cfg.class_num_hidden).cuda())
-        with torch.no_grad():
-            new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
-            new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
-            new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
-            if cfg.class_num_hidden > 0:
-                print("Yes, we use hidden classes.")
-                torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in',
-                                               nonlinearity='linear')
-                new_fc.bias.data[cfg.class_num:].zero_()
-        netC_aux.fc = new_fc
-        netC.eval()
 
     param_group = []
     param_group_aux = []
@@ -355,37 +319,15 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
         # Net-style: split base_model params into encoder (trainable) and fc (trainable, lower lr)
         for k, v in base_model.named_parameters():
             if 'fc' in k:
-                v.requires_grad = True
+                v.requires_grad = False
             else:
-                param_group += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
-        param_group_C = [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1 * 0.3}
+                param_group += [{'params': v, 'lr': cfg.OPTIM.LR}]
+        param_group_C = [{'params': v, 'lr': cfg.OPTIM.LR * 0.3}
                          for k, v in base_model.named_parameters() if 'fc' in k]
         for k, v in netC_aux.named_parameters():
             v.requires_grad = True
-            param_group_aux += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
-    else:
-        # Oh-style param groups
-        param_group_C = []
-        for k, v in netC.named_parameters():
-            v.requires_grad = True
-            param_group_C += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1 * 0.3}]
-        if cfg.class_num_hidden > 0:
-            for k, v in netC_aux.named_parameters():
-                v.requires_grad = True
-                param_group_aux += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
-        else:
-            param_group_aux = param_group_C
-        for k, v in netF.named_parameters():
-            if cfg.OPTIM.LR_DECAY1 > 0:
-                param_group += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
-            else:
-                v.requires_grad = False
-        for k, v in netB.named_parameters():
-            if cfg.OPTIM.LR_DECAY2 > 0:
-                param_group += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY2}]
-            else:
-                v.requires_grad = False
-
+            param_group_aux += [{'params': v, 'lr': cfg.OPTIM.LR}]
+   
     optimizer = optim.SGD(param_group)
     optimizer = op_copy(optimizer)
 
@@ -402,10 +344,6 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
     source_score_bank = torch.zeros(num_sample).cuda()
     if is_net:
         base_model.eval()
-    else:
-        netF.eval()
-        netB.eval()
-        netC.eval()
     netC_aux.eval()
     with torch.no_grad():
         iter_test = iter(loader)
@@ -416,22 +354,14 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
             inputs = inputs.cuda()
             if is_net:
                 _, outputs = base_model(inputs, return_feats=True)
-            else:
-                output = netB(netF(inputs))
-                outputs = netC(output)
             outputs = nn.Softmax(dim=1)(outputs)
             score_bank[indx] = outputs.detach().clone()
             source_score = -torch.sum(outputs * torch.log(outputs + 1e-9), dim=1).mean()
             source_score_bank[indx] = source_score.detach().clone()
 
-    if cfg.SETTING.DATASET == 'office-home':
-        max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"]) * 2
-        interval_iter = max_iter // cfg.TEST.INTERVAL
-        copy_iter = max_iter // 15 // cfg.TEST.INTERVAL
-    else:
-        max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
-        interval_iter = max_iter // cfg.TEST.INTERVAL
-        copy_iter = max_iter // 15 // cfg.TEST.INTERVAL
+    max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
+    interval_iter = max_iter // cfg.TEST.INTERVAL
+    copy_iter = max_iter // 15 // cfg.TEST.INTERVAL
 
     iter_num = 0
     epoch_num = 0
@@ -462,18 +392,11 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
 
         if inputs_test.size(0) == 1:
             continue
-        if not is_net and cfg.SETTING.DATASET == 'office-home' and iter_num % (copy_iter) == 0:
-            copy_netC(netC, netC_aux, cfg.class_num)
-        if not is_net and cfg.SETTING.DATASET == 'VISDA-C' and iter_num % (copy_iter // 8) == 0:
-            copy_netC(netC, netC_aux, cfg.class_num)
 
         if iter_num % interval_iter == 0 and cfg.DIFF_ALIGN.CLS_PAR > 0:
             if is_net:
                 base_model.eval()
-            else:
-                netF.eval()
-                netB.eval()
-                netC.eval()
+        
             netC_aux.eval()
             epoch_num = int(iter_num / interval_iter)
             # Inline CLIP evaluation: oh data = (img, label, idx), net data = (img_1, img_2, label, idx)
@@ -520,35 +443,15 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
                     target_score_bank[test_indx] = test_scores
             if is_net:
                 base_model.train()
-            else:
-                netF.train()
-                netB.train()
-                netC.train()
             netC_aux.train()
 
         logit_clip_score, text_features = mypromt(inputs_clip)
         text_features_all = text_features
         logit_clip_score_include_hidden = clip_text(clip_model, text_features_all, inputs_clip)
 
-        if 'RN' in cfg.DIFF_ALIGN.ARCH:
-            prompt_lr = cfg.OPTIM.LR * 0.1
-        else:
-            if iter_num < 3000:
-                prompt_lr = cfg.OPTIM.LR
-            elif iter_num < 6000:
-                prompt_lr = 0.003
-            else:
-                prompt_lr = 0.001
 
-        try:
-            opt_clip.zero_grad()
-        except:
-            prompt_parameters = [mypromt.prompt_learner.ctx]
-            opt_clip = torch.optim.SGD(prompt_parameters, prompt_lr, weight_decay=5e-4, momentum=0.9,
-                                        nesterov=False)
-            opt_clip.zero_grad()
-            if mypromt.prompt_learner.ctx.grad is not None:
-                mypromt.prompt_learner.ctx.grad.data.zero_()
+        if mypromt.prompt_learner.ctx.grad is not None:
+            mypromt.prompt_learner.ctx.grad.data.zero_()
 
         iter_num += 1
         lr_num = 2000 if cfg.SETTING.DATASET == 'office-home' else 10500
@@ -560,11 +463,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
         if is_net:
             features_classify, base_outputs_test = base_model(inputs_test, return_feats=True)
             outputs_test = netC_aux(features_classify)
-        else:
-            features_shared = netF(inputs_test)
-            features_classify = netB(features_shared)
-            outputs_test = netC_aux(features_classify)
-            base_outputs_test = netC(features_classify)
+
         base_softmax_out = nn.Softmax(dim=1)(base_outputs_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
 
@@ -662,17 +561,12 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             if is_net:
                 base_model.eval()
-            else:
-                netF.eval()
-                netB.eval()
-                netC.eval()
+        
             if cfg.SETTING.DATASET == 'VISDA-C':
                 if is_net:
                     acc_s_te, acc_list = cal_acc(dset_loaders['test'], None, None, None, cfg, base_model=base_model, flag=True)
                     acc_s_te_aux, _ = cal_acc(dset_loaders['test'], None, None, netC_aux, cfg, base_model=base_model, flag=True)
-                else:
-                    acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, cfg, True)
-                    acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux, cfg, True)
+              
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},cls={},gen={}'.format(
                     cfg.name, iter_num, max_iter, acc_s_te, acc_s_te_aux,
                     total_loss, loss_iid, classifier_loss, gentropy_loss) + '\n' + acc_list
@@ -693,21 +587,15 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True, 
             logger.info(log_str)
             if is_net:
                 base_model.train()
-            else:
-                netF.train()
-                netB.train()
+           
 
     if cfg.ISSAVE:
         if is_net:
             torch.save(base_model.state_dict(), osp.join(cfg.output_dir, "target_" + cfg.savename + ".pt"))
             torch.save(netC_aux.state_dict(), osp.join(cfg.output_dir, "target_C_aux_" + cfg.savename + ".pt"))
-        else:
-            torch.save(netF.state_dict(), osp.join(cfg.output_dir, "target_F_" + cfg.savename + ".pt"))
-            torch.save(netB.state_dict(), osp.join(cfg.output_dir, "target_B_" + cfg.savename + ".pt"))
-            torch.save(netC.state_dict(), osp.join(cfg.output_dir, "target_C_" + cfg.savename + ".pt"))
-            torch.save(netC_aux.state_dict(), osp.join(cfg.output_dir, "target_C_aux_" + cfg.savename + ".pt"))
+      
+   
 
-    if is_net:
-        return base_model
-    else:
-        return netF, netB, netC
+   
+    return base_model
+    

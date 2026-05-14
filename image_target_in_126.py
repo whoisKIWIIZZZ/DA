@@ -18,6 +18,7 @@ import src.methods.net.adacontrast as ADACONTRAST
 import src.methods.net.source as SOURCE
 import src.methods.net.diff_new_opt_new as DIFF_NEW_OPT_NEW
 import src.methods.net.diff_new_opt_new_plus as DIFF_NEW_OPT_NEW_PLUS
+import src.methods.net.difo_plus as DIFO_PLUS
 from conf import cfg, load_cfg_from_args
 
 
@@ -105,7 +106,9 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "diff_align_plus":
         print("using diff_align_plus method")
         acc = DIFF_NEW_OPT_NEW_PLUS.train_target(cfg)
-
+    elif cfg.MODEL.METHOD == "difo_plus":
+        print("using difo_plus method")
+        acc = DIFO_PLUS.train_target(cfg)
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))
