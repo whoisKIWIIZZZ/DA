@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>IID Loss 动态权重矩阵改进总结</title>
+<meta name="author" content="shouzhuoyi">
+<meta name="description" content="从静态权重矩阵到四层自适应机制：样本加权、方向控制、bb/nnn动态化、bn修复">
+<meta name="keywords" content="IID loss, 动态权重, 方向对齐, 源感知, 域适应">
+<meta name="generator" content="Kami">
+<style>
+  @font-face {
+    font-family: "TsangerJinKai02";
+    src: url("../fonts/TsangerJinKai02-W04.ttf") format("truetype"),
+         url("https://cdn.jsdelivr.net/gh/tw93/Kami@main/assets/fonts/TsangerJinKai02-W04.ttf") format("truetype");
+    font-weight: 400;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: "TsangerJinKai02";
+    src: url("../fonts/TsangerJinKai02-W05.ttf") format("truetype"),
+         url("https://cdn.jsdelivr.net/gh/tw93/Kami@main/assets/fonts/TsangerJinKai02-W05.ttf") format("truetype");
+    font-weight: 500;
+    font-style: normal;
+  }
+  @page {
+    size: A4;
+    margin: 15mm 18mm 15mm 18mm;
+    background: #f5f4ed;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --parchment: #f5f4ed;
+    --ivory:     #faf9f5;
+    --sand:      #e8e6dc;
+    --near-black:#141413;
+    --dark-warm: #3d3d3a;
+    --olive:     #504e49;
+    --stone:     #6b6a64;
+    --brand:     #1B365D;
+    --border:    #e8e6dc;
+    --border-soft:#e5e3d8;
+    --tag-bg:    #E4ECF5;
+    --serif: "TsangerJinKai02", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", Georgia, serif;
+    --sans: var(--serif);
+    --mono: "JetBrains Mono", "SF Mono", "Fira Code", Consolas, Monaco, monospace;
+  }
+
+  html, body { background: var(--parchment); }
+  @media screen {
+    body { max-width: 210mm; margin: 0 auto; padding: 15mm 18mm; }
+  }
+  body {
+    color: var(--near-black);
+    font-family: var(--serif);
+    font-size: 9.5pt;
+    line-height: 1.45;
+    letter-spacing: 0.3pt;
+  }
+
+  .header {
+    border-left: 2.5pt solid var(--brand);
+    border-radius: 1.5pt;
+    padding-left: 8pt;
+    margin-bottom: 10pt;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+  }
+  .title-block { flex: 1; }
+  .eyebrow {
+    font-size: 8pt;
+    color: var(--brand);
+    letter-spacing: 1pt;
+    text-transform: uppercase;
+    margin-bottom: 3pt;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-size: 20pt;
+    font-weight: 500;
+    color: var(--near-black);
+    line-height: 1.15;
+    margin-bottom: 4pt;
+  }
+  .subtitle { font-size: 10pt; color: var(--olive); line-height: 1.4; }
+  .meta { font-size: 8pt; color: var(--stone); text-align: right; line-height: 1.45; white-space: nowrap; }
+
+  .lead {
+    font-size: 10pt;
+    line-height: 1.5;
+    color: var(--dark-warm);
+    margin-bottom: 10pt;
+  }
+  .hl { color: var(--brand); font-weight: 500; }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14pt;
+    margin-bottom: 10pt;
+  }
+  section { break-inside: avoid; }
+  h2 {
+    font-family: var(--serif);
+    font-size: 13pt;
+    font-weight: 500;
+    color: var(--near-black);
+    margin-bottom: 4pt;
+  }
+  p { margin-bottom: 4pt; line-height: 1.45; }
+  p:last-child { margin-bottom: 0; }
+
+  ul.dash {
+    list-style: none;
+    margin: 0; padding: 0;
+  }
+  ul.dash li {
+    position: relative;
+    padding-left: 12pt;
+    margin-bottom: 2pt;
+    line-height: 1.45;
+    font-size: 9pt;
+  }
+  ul.dash li::before {
+    content: "\2013";
+    position: absolute;
+    left: 0;
+    color: var(--brand);
+  }
+
+  table, .kami-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 8.5pt;
+    margin: 8pt 0;
+    break-inside: avoid;
+  }
+  table th, .kami-table th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--dark-warm);
+    padding: 3pt 5pt;
+    border-bottom: 1pt solid var(--border);
+    background: transparent;
+  }
+  table td, .kami-table td {
+    padding: 2pt 5pt;
+    border-bottom: 0.3pt solid var(--border-soft);
+    vertical-align: top;
+    line-height: 1.4;
+  }
+  table td code, .kami-table td code {
+    font-family: var(--mono);
+    font-size: 7.5pt;
+    background: var(--ivory);
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+  }
+
+  .callout {
+    background: transparent;
+    border-left: 1.8pt solid var(--brand);
+    padding: 2pt 0 2pt 12pt;
+    margin: 8pt 0;
+    font-size: 9pt;
+    line-height: 1.5;
+    color: var(--olive);
+    break-inside: avoid;
+  }
+
+  .footer {
+    margin-top: 10pt;
+    padding-top: 4pt;
+    border-top: 0.3pt dotted var(--border);
+    font-size: 8pt;
+    color: var(--stone);
+    display: flex;
+    justify-content: space-between;
+    letter-spacing: 0.3pt;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="title-block">
+    <div class="eyebrow">IID Loss · 动态权重矩阵改进</div>
+    <h1>从静态权重到四层自适应</h1>
+    <div class="subtitle">基于 source entropy 驱动样本加权、方向控制、bb/nnn 动态化</div>
+  </div>
+  <div class="meta">
+    shouzhuoyi<br>
+    2026.05.14<br>
+    备份: diff_new_opt_new_plus_20260514.bak
+  </div>
+</div>
+
+<p class="lead">
+  核心洞察：IID loss 的 <span class="hl">K×K 静态权重矩阵</span> 对所有样本/类别一视同仁，
+  且梯度<span class="hl">双向流动</span>（target ↔ CLIP 同时更新）。
+  当 source accuracy 高或 CLIP 弱于 target 时，这会拖累 target 学习。
+  修复思路：用 source entropy 作为免费信号，在<span class="hl">样本级</span>和<span class="hl">类别级</span>自适应调节 IID 的对齐强度与方向。
+</p>
+
+<section>
+  <h2>四层自适应机制</h2>
+  <table>
+    <tr>
+      <th>层级</th>
+      <th>机制</th>
+      <th>驱动信号</th>
+      <th>效果</th>
+    </tr>
+    <tr>
+      <td><span class="hl">1 · 样本加权</span></td>
+      <td><code>sample_weights</code> 调制 p_i_j 中各样本的外积贡献</td>
+      <td>source_score_bank (EMA 熵)</td>
+      <td>难样本（高熵）在联合分布中权重更大</td>
+    </tr>
+    <tr>
+      <td><span class="hl">2 · 方向控制</span></td>
+      <td><code>torch.where</code> + detach leader 预测</td>
+      <td>逐样本 target_ent vs clip_ent</td>
+      <td>低熵方不吃梯度，高熵方单向对齐 leader</td>
+    </tr>
+    <tr>
+      <td><span class="hl">3 · bb / nnn 动态</span></td>
+      <td>bb 缩放 [1.0x, 1.5x]；nnn 缩放 [1.0x, 1.0+0.5·progress]</td>
+      <td>batch 平均 source 熵 + known_mass</td>
+      <td>难 batch 增强已知类对齐；nnn 受训练进度门控防早期噪声</td>
+    </tr>
+    <tr>
+      <td><span class="hl">4 · bn 修复</span></td>
+      <td><code>w_aux + bn</code> 替代硬编码 <code>w_aux - 0.2</code></td>
+      <td>目前静态 bn=-0.2</td>
+      <td>bn 真正参与未知类非对角惩罚，可后续动态化</td>
+    </tr>
+  </table>
+</section>
+
+<div class="two-col">
+  <section>
+    <h2>改动文件</h2>
+    <ul class="dash">
+      <li><span class="hl">src/utils/IID_losses.py</span> — IID_loss 新增 sample_weights 参数；bn 参与 weight_matrix[N:,N:] = w_aux + bn</li>
+      <li><span class="hl">src/methods/oh/diff_new_opt_new_plus.py</span> — 四层自适应的实现（lines 683-718）</li>
+    </ul>
+  </section>
+  <section>
+    <h2>方向控制详解（核心）</h2>
+    <p style="font-size:8.5pt;">
+      对每个 selected sample，比较 target 与 CLIP 的熵。
+      <code>target_leads</code> → target detach，CLIP 学 target；
+      <code>!target_leads</code> → CLIP detach，target 学 CLIP。
+      warmup 期 (iter &lt; 80) 保持 target 全 detach 的旧行为。
+    </p>
+  </section>
+</div>
+
+<section>
+  <h2>权重矩阵区域与信号映射</h2>
+  <table class="compact">
+    <tr>
+      <th>区域</th>
+      <th>公式</th>
+      <th>驱动信号</th>
+      <th>当前状态</th>
+    </tr>
+    <tr>
+      <td>已知类对角</td>
+      <td><code>w_base = bb × ent_factor</code></td>
+      <td>batch 平均 source 熵 → 难 batch 加强</td>
+      <td>✅ 动态 [1.0x, 1.5x]</td>
+    </tr>
+    <tr>
+      <td>已知类非对角</td>
+      <td><code>0.45</code></td>
+      <td>无</td>
+      <td>⬜ 静态（未来可基于 source 混淆矩阵）</td>
+    </tr>
+    <tr>
+      <td>未知类对角</td>
+      <td><code>w_aux = nnn × nnn_scale</code></td>
+      <td>known_mass + 训练进度门控</td>
+      <td>✅ 动态，upper bound 渐进放开</td>
+    </tr>
+    <tr>
+      <td>未知类非对角</td>
+      <td><code>w_aux + bn</code></td>
+      <td>跟随 nnn 变动</td>
+      <td>✅ bn 已生效，可后续动态化</td>
+    </tr>
+    <tr>
+      <td>交叉区域</td>
+      <td><code>0.45</code></td>
+      <td>无</td>
+      <td>⬜ 静态</td>
+    </tr>
+  </table>
+</section>
+
+<div class="callout">
+  <span class="hl">未来方向：</span>
+  已知类非对角权重 (0.45) 基于 source 混淆矩阵动态化 ·
+  交叉区域权重动态化 ·
+  CLIP prompt 质量监控以精确控制 nnn 门控放开时机 ·
+  更细粒度的 per-class 自适应替代统一的 batch 级缩放
+</div>
+
+<div class="footer">
+  <span>内部 · 个人参考</span>
+  <span>IID Loss 改进总结 · 2026.05.14</span>
+</div>
+
+</body>
+</html>
