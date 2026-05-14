@@ -9,7 +9,7 @@ echo METHOD: $METHOD
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
 s_list=(0)
-t_list=(2 3)
+t_list=(1 2 )
 # fji
 for s in ${s_list[*]}; do
     for t in ${t_list[*]}; do
