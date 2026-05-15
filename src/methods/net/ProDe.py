@@ -238,7 +238,7 @@ def test_time_tuning(model, inputs, optimizer, cfg, target_output):
         with torch.amp.autocast('cuda'):
             output_logits,_ = model(inputs)             
             output = nn.Softmax(dim=1)(output_logits)
-            iic_loss = IID_losses.IID_loss(output, target_output)
+            iic_loss = IID_losses.IID_loss_old(output, target_output)
         optimizer.zero_grad()
         iic_loss.backward()
         optimizer.step()
