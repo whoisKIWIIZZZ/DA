@@ -675,23 +675,29 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         else:
             classifier_loss = torch.tensor(0.0).cuda()
 
-        neg_iter = 0
-        warmup_iter = 0
-        warmup_iter = 80
-        neg_iter = 100 #officehome
-        #overclustering
-        bb = 1- current_aux
-        nnn = 1-current_aux if iter_num > neg_iter else 0.01
-        bn = -0.3
-        loss_aux,loss_mat = IID_losses.IID_loss(
-            cfg.class_num,
-            softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
-            clip_all_output[indices_greater],
-            bb,
-            nnn,
-            bn,#[CLS] - not a [CLS]
-            lamb = 1.0
-        )
+        # ===== Approach A: Per-sample Negative Gating =====
+        # Use CLIP's own softmax to identify "not" classes (no "not" prompts needed).
+        # Gate out classes where CLIP prob < threshold, then apply standard IID loss.
+        neg_threshold = 1.0 / cfg.class_num  # uniform baseline
+        neg_lambda = getattr(cfg.DIFF_ALIGN, 'NEG_PAR', 0.5)
+
+        student_for_iid = base_softmax_out[indices_greater]
+        clip_for_iid = base_clip_all_output[indices_greater]
+
+        # Hard gate: zero out classes CLIP is confident are NOT this image
+        neg_mask = (clip_for_iid < neg_threshold).float().detach()
+        clip_gated = clip_for_iid * (1 - neg_mask)
+        # Safety: if all classes are gated out (CLIP uncertain), fall back to original
+        all_gated = (neg_mask.sum(dim=1) == neg_mask.size(1))
+        if all_gated.any():
+            clip_gated[all_gated] = clip_for_iid[all_gated]
+        clip_gated = clip_gated / (clip_gated.sum(dim=1, keepdim=True) + 1e-8)
+
+        # Standard IID loss on gated N-class target (no dimension expansion)
+        loss_aux = IID_losses.IID_loss_old(student_for_iid, clip_gated)
+
+        # Negative penalty: student should not be confident on CLIP-negative classes
+        neg_penalty = (student_for_iid * neg_mask).sum(dim=1).mean()
 
 
         # 设置打印选项，确保不换行且保留小数位
@@ -703,7 +709,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         
         # print("="*30 + "\n")
         m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux*1.5
+        loss_iid = loss_aux*1.5 + neg_lambda * neg_penalty
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
@@ -740,9 +746,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, True)
                 acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, True)
                 
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},neg={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
                                                                                      acc_s_te,acc_s_te_aux,
-                                                                                     total_loss,loss_iid,classifier_loss,gentropy_loss) + '\n' + acc_list
+                                                                                     total_loss,loss_iid,neg_penalty,classifier_loss,gentropy_loss) + '\n' + acc_list
                 if iter_num == max_iter:
                     acc =acc_s_te
                
@@ -750,9 +756,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
                 acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter,
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},neg={}'.format(cfg.name, iter_num, max_iter,
                                                                                      acc_s_te,acc_s_te_aux,
-                                                                                     total_loss)
+                                                                                     total_loss,neg_penalty)
 
                 if iter_num == max_iter:
                     acc = acc_s_te
