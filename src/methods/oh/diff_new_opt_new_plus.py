@@ -686,7 +686,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         margin = top1_logit - hard_neg  # [B]
 
         T = 2.0
-        weight = torch.sigmoid(margin / T)  # [B], high when CLIP decision boundary is clear
+        weight = torch.sigmoid(margin / T).detach()  # [B], high when CLIP decision boundary is clear
 
         # Per-sample IID loss weighted by boundary-aware margin
         student_for_iid = base_softmax_out[indices_greater]
