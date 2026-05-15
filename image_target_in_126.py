@@ -19,6 +19,7 @@ import src.methods.net.source as SOURCE
 import src.methods.net.diff_new_opt_new as DIFF_NEW_OPT_NEW
 import src.methods.net.diff_new_opt_new_plus as DIFF_NEW_OPT_NEW_PLUS
 import src.methods.net.difo_plus as DIFO_PLUS
+import src.methods.net.ProDe_diff as ProDe_diff
 from conf import cfg, load_cfg_from_args
 
 
@@ -109,6 +110,10 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "difo_plus":
         print("using difo_plus method")
         acc = DIFO_PLUS.train_target(cfg)
+    
+    elif cfg.MODEL.METHOD == "ProDe_diff":
+        print("using ProDe_diff method")
+        acc = ProDe_diff.train_target(cfg)
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))

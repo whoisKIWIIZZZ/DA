@@ -501,14 +501,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             source_score = -torch.sum(outputs * torch.log(outputs + 1e-9), dim=1).mean()
             source_score_bank[indx] = source_score.detach().clone()
 
-    K_total = cfg.class_num + cfg.class_num_hidden
-    # source-driven confusion matrix: init known-known from source model, uniform elsewhere
-    src_confusion = (score_bank.unsqueeze(2) * score_bank.unsqueeze(1)).sum(dim=0)  # cfg.class_num x cfg.class_num
-    src_confusion = (src_confusion + src_confusion.T) / 2
-    src_confusion = src_confusion / src_confusion.sum()
-    confusion_bank = torch.ones(K_total, K_total, device=score_bank.device) / (K_total * K_total)
-    confusion_bank[:cfg.class_num, :cfg.class_num] = src_confusion
-
     if cfg.SETTING.DATASET == 'office-home':
         
         max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])*2  
@@ -690,59 +682,16 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         #overclustering
         bb = 1- current_aux
         nnn = 1-current_aux if iter_num > neg_iter else 0.01
-        bn = -0.2
-        # dynamic bb / nnn: scale 1.0x(easy) ~ 1.5x(hard) relative to original
-        # nnn upper bound grows with training progress (CLIP prompt learns over time)
-        if indices_greater.numel() > 0:
-            avg_source_ent = current_batch_scores[indices_greater].mean()
-            ent_factor = torch.clamp(avg_source_ent / 2.0, 1.0, 1.5)
-            bb = bb * ent_factor.item()
-            known_mass = softmax_out[indices_greater, :cfg.class_num].sum(dim=1).mean()
-            nnn_upper = 1.0 + 0.5 * (iter_num / max_iter)  # 1.0 early -> 1.5 late
-            nnn_scale = torch.clamp(1.0 + (0.5 - known_mass), 1.0, nnn_upper)
-            nnn = nnn * nnn_scale.item()
-        # sample-level weighting: hard samples contribute more to p_i_j
-        sample_w = None
-        present_mask = None
-        x_out_iid = softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater]
-        clip_out_iid = clip_all_output[indices_greater]
-        if indices_greater.numel() > 0:
-            sample_w = current_batch_scores[indices_greater].clone().detach()
-            sample_w = sample_w / (sample_w.sum() + 1e-9) * sample_w.numel()
-            # DMI: S = argmax classes of target model AND CLIP model within the batch
-            K_total = x_out_iid.size(1)
-            S_X = x_out_iid.detach().argmax(dim=1).unique()
-            S_Y = clip_out_iid.detach().argmax(dim=1).unique()
-            S = torch.cat([S_X, S_Y]).unique()
-            present_mask = torch.zeros(K_total, dtype=torch.bool, device=x_out_iid.device)
-            present_mask[S] = True
-        # source-driven offdiag weights: map confusion_bank to [0.45, 0.7]
-        conf_max = confusion_bank.max()
-        conf_min = confusion_bank.min()
-        conf_range = conf_max - conf_min + 1e-9
-        conf_norm = (confusion_bank - conf_min) / conf_range
-        offdiag_weights = 0.45 + conf_norm * 0.25
-        loss_aux, loss_mat = IID_losses.IID_loss(
+        bn = -0.3
+        loss_aux,loss_mat = IID_losses.IID_loss(
             cfg.class_num,
-            x_out_iid,
-            clip_out_iid,
+            softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
+            clip_all_output[indices_greater],
             bb,
             nnn,
-            bn,
-            lamb = 1.0,
-            sample_weights = sample_w,
-            present_mask = present_mask,
-            offdiag_weights = offdiag_weights
+            bn,#[CLS] - not a [CLS]
+            lamb = 1.0
         )
-        # EMA update confusion_bank: compute batch p_i_j (detached) with sample weights
-        with torch.no_grad():
-            p_i_j_batch = x_out_iid.detach().unsqueeze(2) * clip_out_iid.detach().unsqueeze(1)
-            if sample_w is not None:
-                p_i_j_batch = p_i_j_batch * sample_w.view(-1, 1, 1)
-            p_i_j_batch = p_i_j_batch.sum(dim=0)
-            p_i_j_batch = (p_i_j_batch + p_i_j_batch.T) / 2
-            p_i_j_batch = p_i_j_batch / p_i_j_batch.sum()
-            confusion_bank = 0.99 * confusion_bank + 0.01 * p_i_j_batch
 
 
         # 设置打印选项，确保不换行且保留小数位
@@ -754,7 +703,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         
         # print("="*30 + "\n")
         m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux*bb
+        loss_iid = loss_aux*1.5
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
