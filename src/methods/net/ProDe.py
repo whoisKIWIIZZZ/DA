@@ -190,7 +190,7 @@ def train_target(cfg):
         
         _,clip_index_new = torch.max(new_clip, 1)
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
-        iic_loss = IID_losses.IID_loss(softmax_out, clip_score_sm)
+        iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
 
