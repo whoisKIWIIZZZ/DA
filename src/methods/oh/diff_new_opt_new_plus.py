@@ -701,10 +701,13 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         if indices_greater.numel() > 0:
             sample_w = current_batch_scores[indices_greater].clone().detach()
             sample_w = sample_w / (sample_w.sum() + 1e-9) * sample_w.numel()
-            # DMI: identify present classes (above-uniform probability mass)
+            # DMI: S = argmax classes of target model AND CLIP model within the batch
             K_total = x_out_iid.size(1)
-            class_mass = x_out_iid.detach().sum(dim=0)
-            present_mask = class_mass > (1.0 / K_total)
+            S_X = x_out_iid.detach().argmax(dim=1).unique()
+            S_Y = clip_out_iid.detach().argmax(dim=1).unique()
+            S = torch.cat([S_X, S_Y]).unique()
+            present_mask = torch.zeros(K_total, dtype=torch.bool, device=x_out_iid.device)
+            present_mask[S] = True
         loss_aux,loss_mat = IID_losses.IID_loss(
             cfg.class_num,
             x_out_iid,
