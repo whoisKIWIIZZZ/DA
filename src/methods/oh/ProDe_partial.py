@@ -47,7 +47,7 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
-    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
+    dsets["target"] = ImageList_idx(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
@@ -228,15 +228,14 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            inputs_test, _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            inputs_test, _, tar_idx = next(iter_test)
         if inputs_test.size(0) == 1:
             continue
 
         inputs_test = inputs_test.cuda()
-        inputs_test_augs = inputs_test_augs[0].cuda()
 
         iter_num += 1
         lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
@@ -247,10 +246,7 @@ def train_target(cfg):
         with torch.no_grad():
             outputs_test_new = outputs_test.clone().detach()
 
-        if cfg.ProDe.ARCH == 'RN50':
-            inputs_test_clip = inputs_test_augs
-        else:
-            inputs_test_clip = inputs_test
+        inputs_test_clip = inputs_test
 
         clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new[:, :num_known])
         clip_score = clip_score.float()

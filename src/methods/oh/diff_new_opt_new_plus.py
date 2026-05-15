@@ -695,22 +695,16 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             nnn = nnn * nnn_scale.item()
         # sample-level weighting: hard samples contribute more to p_i_j
         sample_w = None
+        present_mask = None
         x_out_iid = softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater]
         clip_out_iid = clip_all_output[indices_greater]
         if indices_greater.numel() > 0:
             sample_w = current_batch_scores[indices_greater].clone().detach()
             sample_w = sample_w / (sample_w.sum() + 1e-9) * sample_w.numel()
-            # --- directional alignment: detach the more confident model's predictions ---
-            if iter_num >= warmup_iter:
-                with torch.no_grad():
-                    target_ent = -(x_out_iid * torch.log(x_out_iid + 1e-5)).sum(dim=1)
-                    clip_ent = -(clip_out_iid * torch.log(clip_out_iid + 1e-5)).sum(dim=1)
-                    target_leads = target_ent < clip_ent
-                # leader detached: only the follower learns from IID on this sample
-                x_out_det = x_out_iid.detach()
-                clip_out_det = clip_out_iid.detach()
-                x_out_iid = torch.where(target_leads.unsqueeze(1), x_out_det, x_out_iid)
-                clip_out_iid = torch.where(target_leads.unsqueeze(1), clip_out_iid, clip_out_det)
+            # DMI: identify present classes (above-uniform probability mass)
+            K_total = x_out_iid.size(1)
+            class_mass = x_out_iid.detach().sum(dim=0)
+            present_mask = class_mass > (1.0 / K_total)
         loss_aux,loss_mat = IID_losses.IID_loss(
             cfg.class_num,
             x_out_iid,
@@ -719,7 +713,8 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             nnn,
             bn,
             lamb = 1.0,
-            sample_weights = sample_w
+            sample_weights = sample_w,
+            present_mask = present_mask
         )
 
 

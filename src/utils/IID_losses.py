@@ -49,7 +49,7 @@ def IID_loss_old(x_out, x_tf_out, lamb=1.0, EPS=sys.float_info.epsilon):
 
 
 
-def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, EPS=sys.float_info.epsilon):
+def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, present_mask=None, EPS=sys.float_info.epsilon):
   # has had softmax applied
   _, k = x_out.size()
 
@@ -85,7 +85,16 @@ def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, E
        weight_matrix[i,i] = w_base
   for i in range(N,k):
     weight_matrix[i,i] = w_aux
-  
+
+  # DMI: suppress absent-absent region (classes not in this batch get negative weight)
+  if present_mask is not None:
+      n_present = present_mask.sum().item()
+      if 0 < n_present < k:
+          n_absent = k - n_present
+          dmi_scale = np.log(n_present + 1) / np.log(n_absent + 1)
+          absent_idx = torch.where(~present_mask)[0]
+          weight_matrix[absent_idx[:, None], absent_idx[None, :]] *= -dmi_scale
+
   # ---------------------
   loss_all = p_i_j
   loss = (loss*weight_matrix).sum()
