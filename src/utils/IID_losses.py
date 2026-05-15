@@ -50,7 +50,7 @@ def IID_loss_old(x_out, x_tf_out, lamb=1.0, EPS=sys.float_info.epsilon):
 
 
 
-def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, present_mask=None, EPS=sys.float_info.epsilon):
+def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, present_mask=None, offdiag_weights=None, EPS=sys.float_info.epsilon):
   # has had softmax applied
   _, k = x_out.size()
 
@@ -75,13 +75,15 @@ def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, sample_weights=None, p
   loss = - p_i_j * (torch.log(p_i_j) \
                     - lamb * torch.log(p_j) \
                     - lamb * torch.log(p_i))
- # w_base: known-known diagonal (dynamic, driven by source entropy)
+  # w_base: known-known diagonal (dynamic, driven by source entropy)
   # w_aux:  unknown-unknown diagonal
   # bn:     unknown-unknown off-diagonal penalty (negative = discourage confusion)
-  # 0.45:   known-known off-diagonal and cross-region weight
-  weight_matrix = torch.full((k, k), 0.45, device=x_out.device)
+  # offdiag_weights: KxK source-confusion-driven matrix replacing static 0.45
+  if offdiag_weights is not None:
+      weight_matrix = offdiag_weights.clone()
+  else:
+      weight_matrix = torch.full((k, k), 0.45, device=x_out.device)
   weight_matrix[N:,N:] = w_aux + bn
-  weight_matrix[:N,:N] = 0.45
   for i in range(N):
        weight_matrix[i,i] = w_base
   for i in range(N,k):

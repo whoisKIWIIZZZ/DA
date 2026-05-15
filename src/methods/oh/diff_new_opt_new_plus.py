@@ -501,6 +501,14 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             source_score = -torch.sum(outputs * torch.log(outputs + 1e-9), dim=1).mean()
             source_score_bank[indx] = source_score.detach().clone()
 
+    K_total = cfg.class_num + cfg.class_num_hidden
+    # source-driven confusion matrix: init known-known from source model, uniform elsewhere
+    src_confusion = (score_bank.unsqueeze(2) * score_bank.unsqueeze(1)).sum(dim=0)  # cfg.class_num x cfg.class_num
+    src_confusion = (src_confusion + src_confusion.T) / 2
+    src_confusion = src_confusion / src_confusion.sum()
+    confusion_bank = torch.ones(K_total, K_total, device=score_bank.device) / (K_total * K_total)
+    confusion_bank[:cfg.class_num, :cfg.class_num] = src_confusion
+
     if cfg.SETTING.DATASET == 'office-home':
         
         max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])*2  
@@ -708,7 +716,13 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             S = torch.cat([S_X, S_Y]).unique()
             present_mask = torch.zeros(K_total, dtype=torch.bool, device=x_out_iid.device)
             present_mask[S] = True
-        loss_aux,loss_mat = IID_losses.IID_loss(
+        # source-driven offdiag weights: map confusion_bank to [0.45, 0.7]
+        conf_max = confusion_bank.max()
+        conf_min = confusion_bank.min()
+        conf_range = conf_max - conf_min + 1e-9
+        conf_norm = (confusion_bank - conf_min) / conf_range
+        offdiag_weights = 0.45 + conf_norm * 0.25
+        loss_aux, loss_mat = IID_losses.IID_loss(
             cfg.class_num,
             x_out_iid,
             clip_out_iid,
@@ -717,8 +731,18 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             bn,
             lamb = 1.0,
             sample_weights = sample_w,
-            present_mask = present_mask
+            present_mask = present_mask,
+            offdiag_weights = offdiag_weights
         )
+        # EMA update confusion_bank: compute batch p_i_j (detached) with sample weights
+        with torch.no_grad():
+            p_i_j_batch = x_out_iid.detach().unsqueeze(2) * clip_out_iid.detach().unsqueeze(1)
+            if sample_w is not None:
+                p_i_j_batch = p_i_j_batch * sample_w.view(-1, 1, 1)
+            p_i_j_batch = p_i_j_batch.sum(dim=0)
+            p_i_j_batch = (p_i_j_batch + p_i_j_batch.T) / 2
+            p_i_j_batch = p_i_j_batch / p_i_j_batch.sum()
+            confusion_bank = 0.99 * confusion_bank + 0.01 * p_i_j_batch
 
 
         # 设置打印选项，确保不换行且保留小数位
