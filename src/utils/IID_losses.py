@@ -2,49 +2,45 @@ import sys
 
 import torch
 
-def IID_loss_old(x_out, x_tf_out, lamb=1.0, EPS=sys.float_info.epsilon):
+def IID_loss_old(x_out, x_tf_out, lamb=1.0, EPS=sys.float_info.epsilon, reduction='mean'):
   # has had softmax applied
-  _, k = x_out.size()
-  # p_i_j = compute_joint(x_out, x_tf_out)
-
-
-
-
   bn_, k_ = x_out.size()
   assert (x_tf_out.size(0) == bn_ and x_tf_out.size(1) == k_)
-  su_temp1 = x_out.unsqueeze(2)
-  su_temp2 = x_tf_out.unsqueeze(1)
-  p_i_j = x_out.unsqueeze(2) * x_tf_out.unsqueeze(1)  # bn, k, k #这两个相乘有什么用？
+
+  p_i_j = x_out.unsqueeze(2) * x_tf_out.unsqueeze(1)  # bn, k, k
+
+  if reduction == 'none':
+    # per-sample IID: each sample's outer product is its local joint
+    p_i_j = (p_i_j + p_i_j.transpose(1, 2)) / 2.  # symmetrise per sample
+    p_i_j = p_i_j / p_i_j.sum(dim=(1, 2), keepdim=True)  # normalise per sample
+
+    p_i = p_i_j.sum(dim=2)  # bn, k
+    p_j = p_i_j.sum(dim=1)  # bn, k
+
+    p_i_j[(p_i_j < EPS).data] = EPS
+
+    loss_per_sample = - (p_i_j * (torch.log(p_i_j)
+                          - lamb * torch.log(p_j.unsqueeze(2))
+                          - lamb * torch.log(p_i.unsqueeze(1)))).sum(dim=(1, 2))
+    return loss_per_sample  # [bn]
+
+  # original batch-level IID
   p_i_j = p_i_j.sum(dim=0)  # k, k
-  p_i_j = (p_i_j + p_i_j.t()) / 2.  # symmetrise 为什么要对称
+  p_i_j = (p_i_j + p_i_j.t()) / 2.  # symmetrise
   p_i_j = p_i_j / p_i_j.sum()  # normalise
-
-
-
 
   assert (p_i_j.size() == (k, k))
 
   p_i = p_i_j.sum(dim=1).view(k, 1).expand(k, k)
-  p_j = p_i_j.sum(dim=0).view(1, k).expand(k,
-                                           k)  # but should be same, symmetric
+  p_j = p_i_j.sum(dim=0).view(1, k).expand(k, k)
 
-  # avoid NaN losses. Effect will get cancelled out by p_i_j tiny anyway
   p_i_j[(p_i_j < EPS).data] = EPS
-  # p_j[(p_j < EPS).data] = EPS
-  # p_i[(p_i < EPS).data] = EPS
 
   loss = - p_i_j * (torch.log(p_i_j) \
                     - lamb * torch.log(p_j) \
                     - lamb * torch.log(p_i))
 
   loss = loss.sum()
-
-  # loss_no_lamb = - p_i_j * (torch.log(p_i_j) \
-  #                           - torch.log(p_j) \
-  #                           - torch.log(p_i))
-
-  # loss_no_lamb = loss_no_lamb.sum()
-
   return loss
 
 
