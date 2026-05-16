@@ -754,27 +754,37 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             netF.eval()
             netB.eval()
             netC.eval()
+            # Proxy accuracy: argmax(softmax(-neg_logits)) vs ground truth
+            neg_proxy.eval()
+            proxy_correct = 0
+            proxy_total = 0
+            with torch.no_grad():
+                for clip_data in dset_loaders['clip_test']:
+                    clip_inputs = clip_data[0].cuda()
+                    clip_labels = clip_data[1].cuda()
+                    feats = clip_model.encode_image(clip_inputs)
+                    feats = feats / feats.norm(dim=-1, keepdim=True)
+                    proxy_pred = torch.argmax(-neg_proxy(feats), dim=1)
+                    proxy_correct += (proxy_pred == clip_labels).sum().item()
+                    proxy_total += clip_labels.size(0)
+            proxy_acc = proxy_correct / proxy_total * 100
+            neg_proxy.train()
+
             if cfg.SETTING.DATASET == 'VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, True)
-                acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, True)
-                
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
-                                                                                     acc_s_te,acc_s_te_aux,
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%, proxy={:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
+                                                                                     acc_s_te, proxy_acc,
                                                                                      total_loss,loss_iid,classifier_loss,gentropy_loss) + '\n' + acc_list
                 if iter_num == max_iter:
                     acc =acc_s_te
-               
-               # wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
-                acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter,
-                                                                                     acc_s_te,acc_s_te_aux,
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%, proxy={:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter,
+                                                                                     acc_s_te, proxy_acc,
                                                                                      total_loss)
 
                 if iter_num == max_iter:
                     acc = acc_s_te
-             #   wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
                     
             logger.info(log_str)
             netF.train()

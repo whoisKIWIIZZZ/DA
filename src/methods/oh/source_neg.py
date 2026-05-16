@@ -158,8 +158,8 @@ def train_neg_proxy(cfg):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
 
     # --- 5. Training ---
-    max_epochs = 50
-    interval = 5
+    max_epochs = 150
+    interval = 10
     best_val_loss = float('inf')
     best_state = None
 
