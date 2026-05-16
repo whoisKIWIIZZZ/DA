@@ -173,7 +173,7 @@ def train_target(cfg):
     netC.load_state_dict(torch.load(modelpath))
 
     # --- NegProxy: learnable negative proxy for CLIP logit correction ---
-    use_proxy = False#getattr(cfg.ProDe, 'PROXY', 0) == 1
+    use_proxy =True
     if use_proxy:
         feat_dim_proxy = model.image_encoder.output_dim
         neg_proxy = NegProxyLinear(feat_dim_proxy, cfg.class_num).cuda()
@@ -317,6 +317,10 @@ def train_target(cfg):
             optimizer_proxy.zero_grad()
             proxy_loss.backward()
             optimizer_proxy.step()
+
+
+        logger.info(f"correction_norm={proxy_correction.abs().mean().item():.3f}, "
+            f"new_clip_norm={new_clip.abs().mean().item():.3f}")
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
