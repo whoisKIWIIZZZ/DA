@@ -671,7 +671,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         # Modulate CLIP in logit space: subtract neg_logits
         #   neg_logits < 0 → adds to CLIP logit → boosts that class
         #   neg_logits > 0 → subtracts from CLIP logit → suppresses that class
-        proxy_scale = getattr(cfg.DIFF_ALIGN, 'PROXY_SCALE', 5.0)
+        proxy_scale = getattr(cfg.DIFF_ALIGN, 'PROXY_SCALE', 0.1)
         logit_clip_known = logit_clip_score_include_hidden[:, :cfg.class_num]
         combined_logits = logit_clip_known - proxy_scale * neg_logits.detach()
         clip_modulated = nn.Softmax(dim=1)(combined_logits)
