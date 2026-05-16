@@ -241,7 +241,7 @@ def train_target(cfg):
             continue
 
         inputs_test = inputs_test.cuda()
-        inputs_test_augs = inputs_test_augs[0].cuda()
+        inputs_test_augs = inputs_test_augs.cuda()
 
         iter_num += 1
         lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
@@ -252,10 +252,7 @@ def train_target(cfg):
         with torch.no_grad():
             outputs_test_new = outputs_test.clone().detach()
 
-        if cfg.ProDe.ARCH == 'RN50':
-            inputs_test_clip = inputs_test_augs
-        else:
-            inputs_test_clip = inputs_test_augs
+        inputs_test_clip = inputs_test_augs
 
         clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new)
         clip_score = clip_score.float()
