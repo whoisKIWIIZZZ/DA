@@ -173,20 +173,22 @@ def train_target(cfg):
     netC.load_state_dict(torch.load(modelpath))
 
     # --- NegProxy: learnable negative proxy for CLIP logit correction ---
-    feat_dim_proxy = model.image_encoder.output_dim
-    neg_proxy = NegProxyLinear(feat_dim_proxy, cfg.class_num).cuda()
-    neg_proxy_path = cfg.output_dir_src + '/source_C_aux_neg_head.pt'
-    if osp.exists(neg_proxy_path):
-        neg_proxy.load_state_dict(torch.load(neg_proxy_path))
-        logger.info(f"Loaded negative proxy from {neg_proxy_path}")
-    else:
-        logger.warning(f"Negative proxy not found at {neg_proxy_path}, run source_neg.py first")
-    neg_proxy.train()
+    use_proxy = getattr(cfg.ProDe, 'PROXY', 0) == 1
+    if use_proxy:
+        feat_dim_proxy = model.image_encoder.output_dim
+        neg_proxy = NegProxyLinear(feat_dim_proxy, cfg.class_num).cuda()
+        neg_proxy_path = cfg.output_dir_src + '/source_C_aux_neg_head.pt'
+        if osp.exists(neg_proxy_path):
+            neg_proxy.load_state_dict(torch.load(neg_proxy_path))
+            logger.info(f"Loaded negative proxy from {neg_proxy_path}")
+        else:
+            logger.warning(f"Negative proxy not found at {neg_proxy_path}, run source_neg.py first")
+        neg_proxy.train()
 
-    param_group_proxy = [{'params': neg_proxy.parameters(),
-                           'lr': cfg.OPTIM.LR * 0.1}]
-    optimizer_proxy = optim.SGD(param_group_proxy)
-    optimizer_proxy = op_copy(optimizer_proxy)
+        param_group_proxy = [{'params': neg_proxy.parameters(),
+                               'lr': cfg.OPTIM.LR * 0.1}]
+        optimizer_proxy = optim.SGD(param_group_proxy)
+        optimizer_proxy = op_copy(optimizer_proxy)
 
     param_group = []
     param_group_ib = []
@@ -261,19 +263,23 @@ def train_target(cfg):
             new_clip = (outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
 
         # --- NegProxy: CLIP feature extraction & logit correction (Steps 1-3) ---
-        with torch.no_grad():
-            feats_clip = model.image_encoder(inputs_test_clip.type(model.dtype)).float()
-            feats_clip = feats_clip / feats_clip.norm(dim=-1, keepdim=True)
+        if use_proxy:
+            with torch.no_grad():
+                feats_clip = model.image_encoder(inputs_test_clip.type(model.dtype)).float()
+                feats_clip = feats_clip / feats_clip.norm(dim=-1, keepdim=True)
 
-        neg_logits = neg_proxy(feats_clip)
-        neg_probs = torch.sigmoid(neg_logits)
+            neg_logits = neg_proxy(feats_clip)
+            neg_probs = torch.sigmoid(neg_logits)
 
-        proxy_correction = torch.log(
-            (1.0 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
-        corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * proxy_correction.detach()
-        clip_score_sm = nn.Softmax(dim=1)(corrected_clip)
+            proxy_correction = torch.log(
+                (1.0 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
+            corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * proxy_correction.detach()
+            clip_score_sm = nn.Softmax(dim=1)(corrected_clip)
 
-        _, clip_index_new = torch.max(corrected_clip, 1)
+            _, clip_index_new = torch.max(corrected_clip, 1)
+        else:
+            clip_score_sm = nn.Softmax(dim=1)(new_clip)
+            _, clip_index_new = torch.max(new_clip, 1)
         iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
@@ -298,33 +304,41 @@ def train_target(cfg):
         optimizer_ib.step()
 
         # --- NegProxy update via consensus signal (Steps 4-5) ---
-        with torch.no_grad():
-            netc_sm = nn.Softmax(dim=1)(outputs_test_new)
-            clip_sm = nn.Softmax(dim=1)(new_clip)
-            consensus = (netc_sm + clip_sm) / 2
-            proxy_target = 1.0 - consensus
+        if use_proxy:
+            with torch.no_grad():
+                netc_sm = nn.Softmax(dim=1)(outputs_test_new)
+                clip_sm = nn.Softmax(dim=1)(new_clip)
+                consensus = (netc_sm + clip_sm) / 2
+                proxy_target = 1.0 - consensus
 
-        proxy_loss = F.binary_cross_entropy_with_logits(neg_logits, proxy_target)
+            proxy_loss = F.binary_cross_entropy_with_logits(neg_logits, proxy_target)
 
-        lr_scheduler(optimizer_proxy, iter_num=iter_num, max_iter=max_iter)
-        optimizer_proxy.zero_grad()
-        proxy_loss.backward()
-        optimizer_proxy.step()
+            lr_scheduler(optimizer_proxy, iter_num=iter_num, max_iter=max_iter)
+            optimizer_proxy.zero_grad()
+            proxy_loss.backward()
+            optimizer_proxy.step()
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
-            with torch.no_grad():
-                neg_proxy.eval()
-                sample_neg = neg_probs.gather(1, clip_score_sm.argmax(1).unsqueeze(1)).mean()
-                neg_proxy.train()
+            if use_proxy:
+                with torch.no_grad():
+                    neg_proxy.eval()
+                    sample_neg = neg_probs.gather(1, clip_score_sm.argmax(1).unsqueeze(1)).mean()
+                    neg_proxy.train()
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; proxy_loss={:.4f}, avg_neg_on_pred={:.3f}; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, proxy_loss.item(), sample_neg.item(), classifier_loss) + '\n' + acc_list
+                if use_proxy:
+                    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; proxy_loss={:.4f}, avg_neg_on_pred={:.3f}; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, proxy_loss.item(), sample_neg.item(), classifier_loss) + '\n' + acc_list
+                else:
+                    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; proxy_loss={:.4f}, avg_neg_on_pred={:.3f}; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, proxy_loss.item(), sample_neg.item(), classifier_loss)
+                if use_proxy:
+                    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; proxy_loss={:.4f}, avg_neg_on_pred={:.3f}; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, proxy_loss.item(), sample_neg.item(), classifier_loss)
+                else:
+                    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss)
 
             logger.info(log_str)
             netF.train()
