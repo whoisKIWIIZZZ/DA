@@ -180,11 +180,18 @@ def train_neg_proxy(cfg):
             # Forward through MLP
             neg_logits = mlp(feats)
 
-            # Multi-label target: 0 for true class, 1 for others
+            # Multi-label target: 0.05 for true class, 0.95 for others
             target = torch.full_like(neg_logits, 0.95)
             target.scatter_(1, labels.unsqueeze(1), 0.05)
 
-            loss = F.binary_cross_entropy_with_logits(neg_logits, target)
+            # Per-element weight: balance the 1-neg vs (N-1)-pos gradient ratio.
+            # Without this, (B-1) non-class-k samples dominate the 1 class-k
+            # sample per batch, pushing ALL outputs toward 0.95.
+            loss_weight = torch.ones_like(neg_logits)
+            loss_weight.scatter_(1, labels.unsqueeze(1), 10.0)
+
+            loss = F.binary_cross_entropy_with_logits(
+                neg_logits, target, weight=loss_weight)
 
             optimizer.zero_grad()
             loss.backward()
