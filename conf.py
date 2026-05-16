@@ -298,7 +298,7 @@ _C.ProDe.IIC_PAR = 1.3
 _C.ProDe.REP_PAR = 0.1
 _C.ProDe.REP_TOPK = 5
 _C.ProDe.LOAD = None
-
+_C.ProDe.PROXY_WEIGHT= 0.3
 # --------------------------------- DIFO++ options ----------------------------- #
 _C.DIFOPLUS = CfgNode()
 

@@ -28,3 +28,4 @@ ProDe:
   IIC_PAR: 1.3
   REP_PAR: 0.1
   REP_TOPK: 5
+  PROXY_WEIGHT: 0.3
