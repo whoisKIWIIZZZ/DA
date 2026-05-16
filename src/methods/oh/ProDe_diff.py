@@ -259,10 +259,9 @@ def train_target(cfg):
         clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new)
         clip_score = clip_score.float()
 
-        with torch.no_grad():
-            new_clip = (outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+        
 
-        # --- NegProxy: CLIP feature extraction & logit correction (Steps 1-3) ---
+        # --- NegProxy: CLIP feature extraction ---
         if use_proxy:
             with torch.no_grad():
                 feats_clip = model.image_encoder(inputs_test_clip.type(model.dtype)).float()
@@ -271,17 +270,10 @@ def train_target(cfg):
             neg_logits = neg_proxy(feats_clip)
             neg_probs = torch.sigmoid(neg_logits)
 
-            proxy_correction = torch.log(
-                (1.0 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
-            proxy_correction_det = proxy_correction.detach()
-            scale = new_clip.abs().mean() / (proxy_correction_det.abs().mean() + 1e-6)
-            corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * scale * proxy_correction_det
-            clip_score_sm = nn.Softmax(dim=1)(corrected_clip)
-
-            _, clip_index_new = torch.max(corrected_clip, 1)
-        else:
-            clip_score_sm = nn.Softmax(dim=1)(new_clip)
-            _, clip_index_new = torch.max(new_clip, 1)
+        with torch.no_grad():
+            new_clip = (outputs_test_new - 1*neg_logits.cuda()) + clip_score.cuda()
+        clip_score_sm = nn.Softmax(dim=1)(new_clip)
+        _, clip_index_new = torch.max(new_clip, 1)
         iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
@@ -296,7 +288,18 @@ def train_target(cfg):
             gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + cfg.ProDe.EPSILON))
             classifier_loss = classifier_loss - 0.1 * gentropy_loss
         pred = clip_index_new
-        entropy_loss = nn.CrossEntropyLoss()(outputs_test, pred)
+        if use_proxy:
+            with torch.no_grad():
+                pred_neg_prob = neg_probs.gather(1, clip_index_new.unsqueeze(1)).squeeze(1)
+                confident_mask = pred_neg_prob < 0.4
+            if confident_mask.sum() > 0:
+                entropy_loss = nn.CrossEntropyLoss()(
+                    outputs_test[confident_mask],
+                    clip_index_new[confident_mask])
+            else:
+                entropy_loss = torch.tensor(0.0).cuda()
+        else:
+            entropy_loss = nn.CrossEntropyLoss()(outputs_test, pred)
         classifier_loss =  cfg.ProDe.GENT_PAR*entropy_loss + classifier_loss
 
         optimizer.zero_grad()
@@ -320,8 +323,8 @@ def train_target(cfg):
             proxy_loss.backward()
             optimizer_proxy.step()
 
-            logger.info(f"correction_norm={proxy_correction_det.abs().mean().item():.3f}, "
-                f"new_clip_norm={new_clip.abs().mean().item():.3f}")
+        #    logger.info(f"confident_ratio={confident_mask.float().mean().item():.3f}, "
+        #        f"new_clip_norm={new_clip.abs().mean().item():.3f}")
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
@@ -330,7 +333,7 @@ def train_target(cfg):
             if use_proxy:
                 with torch.no_grad():
                     neg_proxy.eval()
-                    sample_neg = neg_probs.gather(1, clip_score_sm.argmax(1).unsqueeze(1)).mean()
+                    sample_neg = neg_probs.gather(1, clip_index_new.unsqueeze(1)).mean()
                     neg_proxy.train()
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
