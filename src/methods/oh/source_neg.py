@@ -158,7 +158,7 @@ def train_neg_proxy(cfg):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
 
     # --- 5. Training ---
-    max_epochs = 150
+    max_epochs = 100
     interval = 10
     best_val_loss = float('inf')
     best_state = None
@@ -184,11 +184,12 @@ def train_neg_proxy(cfg):
             target = torch.full_like(neg_logits, 0.95)
             target.scatter_(1, labels.unsqueeze(1), 0.05)
 
-            # Per-element weight: balance the 1-neg vs (N-1)-pos gradient ratio.
-            # Without this, (B-1) non-class-k samples dominate the 1 class-k
-            # sample per batch, pushing ALL outputs toward 0.95.
+            # Per-element weight: balance the (B-1):1 negative:positive ratio.
+            # Per output k, 31 non-class-k samples (grad≈-0.68 each) drown out
+            # the 1 class-k sample (grad≈+0.22). Net: (W×0.22 - 31×0.68)/2080.
+            # For zero gradient: W = 31×0.68/0.22 ≈ 96 → 100x.
             loss_weight = torch.ones_like(neg_logits)
-            loss_weight.scatter_(1, labels.unsqueeze(1), 10.0)
+            loss_weight.scatter_(1, labels.unsqueeze(1), 100.0)
 
             loss = F.binary_cross_entropy_with_logits(
                 neg_logits, target, weight=loss_weight)
