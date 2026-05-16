@@ -121,17 +121,26 @@ def train_neg_proxy(cfg):
     import clip
     arch = getattr(getattr(cfg, 'DIFF_ALIGN', None), 'ARCH', None) or 'ViT-B/32'
     logger.info(f"Loading CLIP model: {arch}")
-    clip_model, preprocess, _ = clip.load(arch)
+    clip_model = clip.load(arch)[0]
     clip_model.float().cuda()
     clip_model.eval()
     for p in clip_model.parameters():
         p.requires_grad = False
 
+    # Define CLIP transform inline (avoid relying on clip.load() preprocess)
+    clip_transform = transforms.Compose([
+        transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
+                             std=(0.26862954, 0.26130258, 0.27577711)),
+    ])
+
     # Infer feature dimension from CLIP
     feat_dim = clip_model.visual.output_dim
 
     # --- 2. Data loading ---
-    dset_loaders = data_load(cfg, preprocess)
+    dset_loaders = data_load(cfg, clip_transform)
     class_num = cfg.class_num
     logger.info(f"Source classes: {class_num}, feature dim: {feat_dim}")
 
