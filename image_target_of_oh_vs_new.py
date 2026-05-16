@@ -180,7 +180,7 @@ if __name__ == "__main__":
         # acc = DIFF_ALIGN.train_target(cfg,beta_pre_1 = 0,beta_pre_2 =0.1,use_iid = True,use_cls=True,use_clip = True)       
     elif cfg.MODEL.METHOD == "source_neg":
         print("train with negative prompts")
-        acc = SOURCE_NEG.train_source_neg_objective(cfg)
+        acc = SOURCE_NEG.train_neg_proxy(cfg)
     elif cfg.MODEL.METHOD == "source_clip":
         print("train the neg clip")
         acc = SOURCE_CLIP.train_clip_prompt_dual(cfg)
