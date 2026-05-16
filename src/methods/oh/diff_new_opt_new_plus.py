@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torchvision import transforms
 # from src.utils import loss,prompt_tuning,IID_losses
 from src.utils import loss,IID_losses
@@ -375,9 +376,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         logger.info(f"Loaded negative proxy from {neg_proxy_path}")
     else:
         logger.warning(f"Negative proxy not found at {neg_proxy_path}, run source_neg.py first")
-    neg_proxy.eval()
-    for p in neg_proxy.parameters():
-        p.requires_grad = False
+    # Proxy will be fine-tuned on target domain; start in train mode
 
     # 训练测试数据导入
     dset_loaders = data_load(cfg,preprocess)
@@ -490,6 +489,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
     opt_C = optim.SGD(param_group_C)
     opt_C = op_copy(opt_C)
+
+    # Proxy optimizer for target-domain fine-tuning (lower lr than source training)
+    opt_proxy = optim.Adam(neg_proxy.parameters(), lr=1e-4, weight_decay=1e-4)
 
     loader = dset_loaders["target"]
     num_sample = len(loader.dataset)
@@ -660,13 +662,19 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         K = base_softmax_out.size(1)
         
         base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
-        # Modulate CLIP output with negative proxy: downweight "not class" predictions
+        # Extract CLIP image features (frozen encoder)
         with torch.no_grad():
             clip_image_feat = clip_model.encode_image(inputs_clip)
             clip_image_feat = clip_image_feat / clip_image_feat.norm(dim=-1, keepdim=True)
-            neg_probs = torch.sigmoid(neg_proxy(clip_image_feat))
-        clip_modulated = base_clip_all_output * (1 - neg_probs)
-        clip_modulated = clip_modulated / clip_modulated.sum(dim=1, keepdim=True)
+        # Proxy forward (with grad, for fine-tuning loss below)
+        neg_logits = neg_proxy(clip_image_feat)  # (B, N): >0 = "not class", <0 = "is class"
+        # Modulate CLIP in logit space: subtract neg_logits
+        #   neg_logits < 0 → adds to CLIP logit → boosts that class
+        #   neg_logits > 0 → subtracts from CLIP logit → suppresses that class
+        proxy_scale = getattr(cfg.DIFF_ALIGN, 'PROXY_SCALE', 5.0)
+        logit_clip_known = logit_clip_score_include_hidden[:, :cfg.class_num]
+        combined_logits = logit_clip_known - proxy_scale * neg_logits.detach()
+        clip_modulated = nn.Softmax(dim=1)(combined_logits)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
         _, clip_predict = torch.max(base_clip_all_output, 1)  # 从test clip来
         
@@ -706,6 +714,24 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
 
+        # Fine-tune proxy on target domain: consensus pseudo-labels (student+CLIP agree)
+        with torch.no_grad():
+            student_conf, student_pred = base_softmax_out.max(dim=1)
+            _, clip_pred = base_clip_all_output.max(dim=1)
+            consensus = (student_pred == clip_pred) & (student_conf > 0.8)
+        if consensus.sum() > 0:
+            neg_logits_conf = neg_logits[consensus]
+            pseudo_labels = student_pred[consensus]
+            target_proxy = torch.full_like(neg_logits_conf, 0.95)
+            target_proxy.scatter_(1, pseudo_labels.unsqueeze(1), 0.05)
+            loss_w_proxy = torch.ones_like(neg_logits_conf)
+            loss_w_proxy.scatter_(1, pseudo_labels.unsqueeze(1), 10.0)
+            loss_proxy = F.binary_cross_entropy_with_logits(
+                neg_logits_conf, target_proxy, weight=loss_w_proxy)
+            loss_proxy = loss_proxy * 0.1
+        else:
+            loss_proxy = torch.tensor(0.0).cuda()
+
         m_base_sft = base_softmax_out.mean(dim=0)
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
       
@@ -715,12 +741,14 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         optimizer.zero_grad()
         opt_C.zero_grad()
         opt_aux.zero_grad()
-        total_loss = classifier_loss + loss_iid - cfg.DIFF_ALIGN.GENT_PAR * gentropy_loss + cfg.DIFF_ALIGN.LENT_PAR * loss_ent
+        opt_proxy.zero_grad()
+        total_loss = classifier_loss + loss_iid - cfg.DIFF_ALIGN.GENT_PAR * gentropy_loss + cfg.DIFF_ALIGN.LENT_PAR * loss_ent + loss_proxy
         total_loss.backward()
         optimizer.step()
         
         opt_C.step()
         opt_aux.step()
+        opt_proxy.step()
         if use_clip:
             if iter_num <  (max_iter/2):
                 with torch.no_grad():
