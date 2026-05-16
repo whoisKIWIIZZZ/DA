@@ -16,6 +16,7 @@ import clip
 from src.utils.utils import *
 from src.utils.prompt_tuning_diff_new_optim_1130 import *
 from src.utils.loss import entropy
+from src.methods.oh.source_neg import NegProxyLinear
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +366,19 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     clip_model.float()
     # 引入clip后，自构造text的输入
     text_inputs = clip_pre_text(cfg)  # 65*77
+    # --- Load negative proxy for CLIP modulation ---
+    feat_dim_neg = clip_model.visual.output_dim
+    neg_proxy = NegProxyLinear(feat_dim_neg, cfg.class_num).cuda()
+    neg_proxy_path = osp.join(cfg.output_dir_src, "source_C_aux_neg_head.pt")
+    if osp.exists(neg_proxy_path):
+        neg_proxy.load_state_dict(torch.load(neg_proxy_path))
+        logger.info(f"Loaded negative proxy from {neg_proxy_path}")
+    else:
+        logger.warning(f"Negative proxy not found at {neg_proxy_path}, run source_neg.py first")
+    neg_proxy.eval()
+    for p in neg_proxy.parameters():
+        p.requires_grad = False
+
     # 训练测试数据导入
     dset_loaders = data_load(cfg,preprocess)
 
@@ -646,7 +660,13 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         K = base_softmax_out.size(1)
         
         base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
-        clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
+        # Modulate CLIP output with negative proxy: downweight "not class" predictions
+        with torch.no_grad():
+            clip_image_feat = clip_model.encode_image(inputs_clip)
+            clip_image_feat = clip_image_feat / clip_image_feat.norm(dim=-1, keepdim=True)
+            neg_probs = torch.sigmoid(neg_proxy(clip_image_feat))
+        clip_modulated = base_clip_all_output * (1 - neg_probs)
+        clip_modulated = clip_modulated / clip_modulated.sum(dim=1, keepdim=True)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
         _, clip_predict = torch.max(base_clip_all_output, 1)  # 从test clip来
         
@@ -675,37 +695,18 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         else:
             classifier_loss = torch.tensor(0.0).cuda()
 
-        neg_iter = 0
-        warmup_iter = 0
+        # IID loss with negative-proxy-modulated CLIP target
         warmup_iter = 80
-        neg_iter = 100 #officehome
-        #overclustering
-        bb = 1- current_aux
-        nnn = 1-current_aux if iter_num > neg_iter else 0.01
-        bn = -0.3
-        loss_aux,loss_mat = IID_losses.IID_loss(
-            cfg.class_num,
-            softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
-            clip_all_output[indices_greater],
-            bb,
-            nnn,
-            bn,#[CLS] - not a [CLS]
-            lamb = 1.0
+        softmax_out_known = nn.Softmax(dim=1)(outputs_test[:, :cfg.class_num])
+        loss_iid = IID_losses.IID_loss_old(
+            softmax_out_known[indices_greater].detach() if iter_num < warmup_iter else softmax_out_known[indices_greater],
+            clip_modulated[indices_greater]
         )
-
-
-        # 设置打印选项，确保不换行且保留小数位
-        # np.set_printoptions(precision=4, suppress=True, linewidth=200)
-        
-        # print("\n" + "="*30)
-        # df = pd.DataFrame(loss_mat.detach().cpu().numpy())
-        # print(df.to_string()) 
-        
-        # print("="*30 + "\n")
-        m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux*1.5
+        loss_iid = loss_iid * 1.5
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
+
+        m_base_sft = base_softmax_out.mean(dim=0)
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
       
         with torch.no_grad():
