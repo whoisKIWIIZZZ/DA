@@ -717,7 +717,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         # Fine-tune proxy via CE with predict_mix as soft pseudo-labels.
         # predict_mix = student+CLIP weighted fusion, same signal as cls_loss.
         # indices_greater = confident samples (diff > margin), cleaner teacher.
-        loss_proxy = -(predict_mix[indices_greater] * F.log_softmax(-neg_logits[indices_greater], dim=1)).sum(dim=1).mean()
+        loss_proxy = -(predict_mix[indices_greater].detach() * F.log_softmax(-neg_logits[indices_greater], dim=1)).sum(dim=1).mean()
         loss_proxy = loss_proxy * 0.05
 
         m_base_sft = base_softmax_out.mean(dim=0)
