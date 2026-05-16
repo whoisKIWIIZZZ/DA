@@ -9,232 +9,200 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import logging
 
-from src.models import network
 from src.data.data_list import ImageList
 from src.utils.utils import *
-from src.utils import loss
 
 logger = logging.getLogger(__name__)
 
-# ==========================================================================================
-# Helper Functions (Copied from source_pretrain_neg_objective.py)
-# ==========================================================================================
+# ======================================================================
+# Approach B: CLIP Feature-Space Negative Proxy
+#
+# Trains a lightweight MLP on frozen CLIP image features to predict
+# per-class "negativeness" scores via multi-label BCE.
+#
+# For a source sample of class k:
+#   target[k] = 0     (this IS class k, not "not k")
+#   target[j!=k] = 1  (this is NOT class j)
+#
+# At test time on target domain, the learned decision boundaries
+# transfer through CLIP's domain-invariant feature space.
+# ======================================================================
+
 
 def op_copy(optimizer):
     for param_group in optimizer.param_groups:
         param_group['lr0'] = param_group['lr']
     return optimizer
 
-def lr_scheduler(optimizer, iter_num, max_iter, gamma=10, power=0.75):
-    decay = (1 + gamma * iter_num / max_iter) ** (-power)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = param_group['lr0'] * decay
-        param_group['weight_decay'] = 1e-3
-        param_group['momentum'] = 0.9
-        param_group['nesterov'] = True
-    return optimizer
 
-def image_train(resize_size=256, crop_size=224, alexnet=False):
-  if not alexnet:
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                   std=[0.229, 0.224, 0.225])
-  return  transforms.Compose([
-        transforms.Resize((resize_size, resize_size)),
-        transforms.RandomCrop(crop_size),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ])
-
-def image_test(resize_size=256, crop_size=224, alexnet=False):
-  if not alexnet:
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                   std=[0.229, 0.224, 0.225])
-  return  transforms.Compose([
-        transforms.Resize((resize_size, resize_size)),
-        transforms.CenterCrop(crop_size),
-        transforms.ToTensor(),
-        normalize
-    ])
-
-def data_load(cfg): 
+def data_load(cfg, clip_preprocess):
     dsets = {}
     dset_loaders = {}
     train_bs = cfg.TEST.BATCH_SIZE
     txt_src = open(cfg.s_dset_path).readlines()
-    
+
     if cfg.SOURCE.TRTE == "val":
         dsize = len(txt_src)
-        tr_size = int(0.9*dsize)
-        tr_txt, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size])
+        tr_size = int(0.9 * dsize)
+        tr_txt, te_txt = torch.utils.data.random_split(
+            txt_src, [tr_size, dsize - tr_size])
     else:
         dsize = len(txt_src)
-        tr_size = int(0.9*dsize)
-        _, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size])
+        tr_size = int(0.9 * dsize)
+        _, te_txt = torch.utils.data.random_split(
+            txt_src, [tr_size, dsize - tr_size])
         tr_txt = txt_src
 
-    dsets["source_tr"] = ImageList(tr_txt, transform=image_train())
-    dset_loaders["source_tr"] = DataLoader(dsets["source_tr"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["source_te"] = ImageList(te_txt, transform=image_test())
-    dset_loaders["source_te"] = DataLoader(dsets["source_te"], batch_size=train_bs*2, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["source_tr"] = ImageList(tr_txt, transform=clip_preprocess)
+    dset_loaders["source_tr"] = DataLoader(
+        dsets["source_tr"], batch_size=train_bs, shuffle=True,
+        num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["source_te"] = ImageList(te_txt, transform=clip_preprocess)
+    dset_loaders["source_te"] = DataLoader(
+        dsets["source_te"], batch_size=train_bs * 2, shuffle=False,
+        num_workers=cfg.NUM_WORKERS, drop_last=False)
 
     return dset_loaders
 
-def cal_acc_neg(loader, netF, netB, netC):
-    start_test = True
+
+class NegProxyMLP(nn.Module):
+    """
+    Lightweight MLP that maps CLIP image features to N per-class
+    negativeness logits.  BCE training target: 0 for true class,
+    1 for all other classes (one-vs-rest negative classification).
+    """
+    def __init__(self, feat_dim, hidden_dim, num_classes, dropout=0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def eval_neg_proxy(loader, clip_model, mlp, cfg):
+    """Evaluate neg proxy: BCE loss + per-class metrics."""
+    mlp.eval()
+    total_loss = 0.0
+    total_true_neg = 0.0   # sigmoid < 0.5 on true class (correct)
+    total_other_pos = 0.0  # sigmoid > 0.5 on at least one other class
+    n_samples = 0
+
     with torch.no_grad():
-        iter_test = iter(loader)
-        for i in range(len(loader)):
-            data = next(iter_test)
-            inputs = data[0]
-            labels = data[1]
-            inputs = inputs.cuda()
-            outputs = netC(netB(netF(inputs)))
-            if start_test:
-                all_output = outputs.float().cpu()
-                all_label = labels.float()
-                start_test = False
-            else:
-                all_output = torch.cat((all_output, outputs.float().cpu()), 0)
-                all_label = torch.cat((all_label, labels.float()), 0)
+        for inputs, labels in loader:
+            inputs, labels = inputs.cuda(), labels.cuda()
+            feats = clip_model.encode_image(inputs)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            neg_logits = mlp(feats)
 
-    all_output = nn.Softmax(dim=1)(all_output)
-    _, predict = torch.min(all_output, 1)
-    accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
-    mean_ent = torch.mean(loss.Entropy(all_output)).cpu().data.item()
-   
-    return accuracy*100, mean_ent
+            target = torch.full_like(neg_logits, 0.95)
+            target.scatter_(1, labels.unsqueeze(1), 0.05)
+            loss = F.binary_cross_entropy_with_logits(neg_logits, target)
+            total_loss += loss.item() * inputs.size(0)
 
-# ==========================================================================================
-# Main Training Function
-# ==========================================================================================
+            neg_probs = torch.sigmoid(neg_logits)
+            # True class correctly identified as "not negative"?
+            true_probs = neg_probs.gather(1, labels.unsqueeze(1)).squeeze(1)
+            total_true_neg += (true_probs < 0.5).float().sum().item()
+            n_samples += inputs.size(0)
 
-def train_source_neg_objective(cfg):
-    logger.info("Starting to train a dedicated negative head...")
+    mlp.train()
+    return total_loss / n_samples, total_true_neg / n_samples * 100
 
-    # --- 1. Data Loading ---
-    dset_loaders = data_load(cfg)
-    
-    # --- 2. Model Initialization ---
-    if cfg.MODEL.ARCH.startswith('res'):
-        netF = network.ResBase(res_name=cfg.MODEL.ARCH).cuda()
-        netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
-    else:
-        raise ValueError(f"Unsupported architecture: {cfg.MODEL.ARCH}")
 
-    # Initialize the negative head classifier
-    netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
- 
+def train_neg_proxy(cfg):
+    logger.info("=== Approach B: Training CLIP Negative Proxy ===")
 
-    # --- 3. Load and Freeze Pre-trained Models ---
-    try:
-        f_path = osp.join(cfg.output_dir_src, "source_F.pt")
-        b_path = osp.join(cfg.output_dir_src, "source_B.pt")
-        c_path = osp.join("./Models/source/uda/office-home/A", "source_C_aux_neg_head.pt")
-        netF.load_state_dict(torch.load(f_path))
-        netB.load_state_dict(torch.load(b_path))
-        netC_aux.load_state_dict(torch.load(c_path))
-        logger.info(f"Loaded pre-trained netF and netB from {cfg.output_dir_src}")
-    except FileNotFoundError:
-        logger.error("Pre-trained source_F.pt or source_B.pt not found! Please run standard source training first.")
-        return
+    # --- 1. Load CLIP model (frozen feature extractor) ---
+    import clip
+    arch = getattr(getattr(cfg, 'DIFF_ALIGN', None), 'ARCH', None) or 'ViT-B/32'
+    logger.info(f"Loading CLIP model: {arch}")
+    clip_model, preprocess, _ = clip.load(arch)
+    clip_model.float().cuda()
+    clip_model.eval()
+    for p in clip_model.parameters():
+        p.requires_grad = False
 
-    netF.eval()
-    netB.eval()
-    for param in netF.parameters():
-        param.requires_grad = False
-    for param in netB.parameters():
-        param.requires_grad = False
-    
+    # Infer feature dimension from CLIP
+    feat_dim = clip_model.visual.output_dim
+
+    # --- 2. Data loading ---
+    dset_loaders = data_load(cfg, preprocess)
+    class_num = cfg.class_num
+    logger.info(f"Source classes: {class_num}, feature dim: {feat_dim}")
+
+    # --- 3. Build MLP negative proxy ---
+    hidden_dim = 256
+    mlp = NegProxyMLP(feat_dim, hidden_dim, class_num).cuda()
+    logger.info(f"NegProxy MLP: {feat_dim} -> {hidden_dim} -> {class_num}")
+
     # --- 4. Optimizer ---
-    # The optimizer will only update the parameters of netC_aux
-    optimizer = op_copy(optim.SGD(netC_aux.parameters(), lr=cfg.OPTIM.LR, momentum=0.9, weight_decay=1e-3, nesterov=True))
+    optimizer = optim.Adam(mlp.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
 
-    # --- 5. Training Loop ---
-    max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["source_tr"])
-    interval_iter = max_iter // 10
-    iter_num = 0
-    acc_init = 0
+    # --- 5. Training ---
+    max_epochs = 50
+    interval = 5
+    best_val_loss = float('inf')
+    best_state = None
 
-    p_low = 2e-5
-    p_uniform = (1.0 - p_low) / (cfg.class_num - 1)
+    logger.info(f"Training for {max_epochs} epochs...")
+    for epoch in range(max_epochs):
+        mlp.train()
+        epoch_loss = 0.0
+        n_batches = 0
 
-    netC_aux.train()
+        for inputs, labels in dset_loaders["source_tr"]:
+            inputs, labels = inputs.cuda(), labels.cuda()
 
-    while iter_num < max_iter:
-        try:
-            inputs_source, labels_source = next(source_iter)
-        except (NameError, StopIteration):
-            source_iter = iter(dset_loaders["source_tr"])
-            inputs_source, labels_source = next(source_iter)
+            # Extract frozen CLIP features
+            with torch.no_grad():
+                feats = clip_model.encode_image(inputs)
+                feats = feats / feats.norm(dim=-1, keepdim=True)
 
-        if inputs_source.size(0) == 1:
-            continue
+            # Forward through MLP
+            neg_logits = mlp(feats)
 
-        iter_num += 1
-        lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
+            # Multi-label target: 0 for true class, 1 for others
+            target = torch.full_like(neg_logits, 0.95)
+            target.scatter_(1, labels.unsqueeze(1), 0.05)
 
-        inputs_source, labels_source = inputs_source.cuda(), labels_source.cuda()
+            loss = F.binary_cross_entropy_with_logits(neg_logits, target)
 
-        # --- Loss Calculation ---
-        with torch.no_grad(): # Features are extracted without computing gradients
-            features = netB(netF(inputs_source))
-        
-        outputs_aux = netC_aux(features)
-        
-        batch_size = inputs_source.size(0)
-        target_distribution_neg = torch.full((batch_size, cfg.class_num), p_uniform).cuda()
-        target_distribution_neg.scatter_(1, labels_source.unsqueeze(1), p_low)
-        
-        log_p_neg = F.log_softmax(outputs_aux, dim=1)
-        loss = F.kl_div(log_p_neg, target_distribution_neg, reduction='batchmean')
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        # --- Optimization ---
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
 
-        if iter_num % interval_iter == 0 or iter_num == max_iter or iter_num == 1:
-            netC_aux.eval()
-            neg_acc, _ = cal_acc_neg(dset_loaders['source_te'], netF, netB, netC_aux)
-            
-            
-            num_samples_to_print = 3
-            if batch_size > num_samples_to_print:
-                rand_indices = torch.randperm(batch_size)[:num_samples_to_print]
-            else:
-                rand_indices = torch.arange(batch_size)
+        scheduler.step()
+        avg_loss = epoch_loss / max(n_batches, 1)
 
-            debug_log_str = "\n--- Sampled Predictions for Debugging ---"
-            for i in rand_indices:
-                label = labels_source[i].item()
-                debug_log_str += f"\n[Sample GT: {label}]"
-               
-                # ResNet Aux (Negative)
-                softmax_aux = F.softmax(outputs_aux[i], dim=0).detach().cpu().numpy()
-                debug_log_str += f"\n  netC_aux (neg)  softmax: {np.array_str(softmax_aux, precision=5, suppress_small=True)}"
-
-            debug_log_str += "\n-----------------------------------------"
-            logger.info(debug_log_str)
-            
-            log_str = (f"Iter: {iter_num}/{max_iter}, Loss: {loss.item():.4f}, "
-                       f"Neg Acc: {neg_acc:.2f}%")
+        if (epoch + 1) % interval == 0 or epoch == 0:
+            val_loss, true_neg_acc = eval_neg_proxy(
+                dset_loaders["source_te"], clip_model, mlp, cfg)
+            log_str = (f"Epoch {epoch+1}/{max_epochs}: "
+                       f"train_loss={avg_loss:.4f}, "
+                       f"val_loss={val_loss:.4f}, "
+                       f"true_neg_acc={true_neg_acc:.1f}%")
             logger.info(log_str)
 
-            if neg_acc >= acc_init:
-                acc_init = neg_acc
-                best_netC_aux = netC_aux.state_dict()
-                logger.info(f"Best model updated at iter {iter_num} with Neg Acc: {neg_acc:.2f}%")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in mlp.state_dict().items()}
+                logger.info(f"  -> new best (val_loss={best_val_loss:.4f})")
 
-            netC_aux.train()
+    # --- 6. Save ---
+    mlp.load_state_dict(best_state)
+    output_dir = cfg.output_dir_src
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = osp.join(output_dir, "source_C_aux_neg_head.pt")
+    torch.save(best_state, save_path)
+    logger.info(f"Negative proxy saved to {save_path}")
 
-    # --- 6. Save Model ---
-    if True:
-        logger.info(f"Saving best negative head (from iter with Neg Acc: {acc_init:.2f}%)")
-        output_dir = cfg.output_dir_src
-        if not osp.exists(output_dir):
-            os.makedirs(output_dir)
-            
-        torch.save(best_netC_aux, osp.join(output_dir, "source_C_aux_neg_head.pt"))
-        logger.info(f"Model saved to {output_dir}")
-
+    return mlp

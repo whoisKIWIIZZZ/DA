@@ -675,65 +675,23 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         else:
             classifier_loss = torch.tensor(0.0).cuda()
 
-        # ===== Approach A v2: Soft Negative Gating + Margin Weighting =====
-        #
-        # Two orthogonal mechanisms:
-        #   MARGIN (sample-level): which samples have reliable CLIP signal?
-        #   GATING (class-level):  which classes within a sample carry real signal?
-        #
-        # Core insight: CLIP softmax tail (p < 1/N) is low-SNR noise from
-        # softmax normalization, not actual discriminative signal.
-        # Gating removes these noisy dimensions from the IID alignment target.
-        #
-        # v2 improvements over v1:
-        #   1. SOFT gating (sigmoid) instead of hard threshold → no brittle cutoff
-        #   2. Temperature tied to CLIP entropy → adaptive per sample
-        #   3. Combined with margin weight → sample + class level filtering
-
-        clip_logits_N = logit_clip_score_include_hidden[:, :cfg.class_num]  # [B, N]
-
-        # --- Sample-level: margin weight (boundary-aware) ---
-        top1_logit, top1_idx = clip_logits_N.max(dim=1)
-        mask_margin = torch.ones_like(clip_logits_N).scatter_(1, top1_idx.unsqueeze(1), 0)
-        neg_logits = clip_logits_N.masked_fill(mask_margin == 0, -1e9)
-        hard_neg = torch.logsumexp(neg_logits, dim=1)
-        margin = top1_logit - hard_neg  # [B]
-        weight = torch.sigmoid(margin / 2.0).detach()  # [B]
-
-        # --- Class-level: soft negative gating ---
-        clip_probs = nn.Softmax(dim=1)(clip_logits_N)
-
-        # Per-sample entropy → adaptive gating temperature
-        # Low entropy (CLIP confident) → sharp gate (aggressive tail removal)
-        # High entropy (CLIP uncertain) → soft gate (conservative, protect Type D)
-        ent = -(clip_probs * torch.log(clip_probs + 1e-8)).sum(dim=1)  # [B]
-        ent_max = np.log(cfg.class_num)
-        tau = 0.5 + 1.5 * (ent / ent_max)  # [B], range [0.5, 2.0]
-
-        # Soft gate: sigmoid(log(p / uniform))
-        # gate[i] ≈ 1 when CLIP says class i is MORE likely than random
-        # gate[i] ≈ 0 when CLIP says class i is LESS likely than random
-        log_uniform = torch.log(torch.tensor(1.0 / cfg.class_num, device=clip_probs.device))
-        log_ratio = torch.log(clip_probs + 1e-8) - log_uniform  # [B, N]
-        gate = torch.sigmoid(log_ratio / tau.unsqueeze(1))  # [B, N]
-
-        # Apply gate and renormalize → CLIP target focuses on "above-random" classes
-        clip_gated = clip_probs * gate
-        clip_gated = clip_gated / (clip_gated.sum(dim=1, keepdim=True) + 1e-8)
-
-        # --- Combined IID loss ---
-        student_for_iid = base_softmax_out[indices_greater]
-        clip_for_iid = clip_gated[indices_greater]
-
-        iid_per_sample = IID_losses.IID_loss_old(
-            student_for_iid,
-            clip_for_iid,
-            reduction='none'
+        neg_iter = 0
+        warmup_iter = 0
+        warmup_iter = 80
+        neg_iter = 100 #officehome
+        #overclustering
+        bb = 1- current_aux
+        nnn = 1-current_aux if iter_num > neg_iter else 0.01
+        bn = -0.3
+        loss_aux,loss_mat = IID_losses.IID_loss(
+            cfg.class_num,
+            softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
+            clip_all_output[indices_greater],
+            bb,
+            nnn,
+            bn,#[CLS] - not a [CLS]
+            lamb = 1.0
         )
-
-        # Sample-level weight × class-level gated IID
-        weight_filtered = weight[indices_greater]
-        loss_aux = (iid_per_sample * weight_filtered).mean()
 
 
         # 设置打印选项，确保不换行且保留小数位
@@ -745,7 +703,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         
         # print("="*30 + "\n")
         m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux * 1.5
+        loss_iid = loss_aux*1.5
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
