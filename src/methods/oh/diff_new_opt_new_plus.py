@@ -714,12 +714,11 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
 
-        # Fine-tune proxy via IID: align proxy_pos with student at batch level.
-        # proxy_pos = softmax(-neg_logits): "which class IS this" from proxy's neg-view.
-        # Batch-level joint matrix makes this robust to individual student errors.
-        proxy_pos = nn.Softmax(dim=1)(-neg_logits)
-        loss_proxy = IID_losses.IID_loss_old(proxy_pos, base_softmax_out.detach())
-        loss_proxy = loss_proxy * 0.1
+        # Fine-tune proxy via CE with predict_mix as soft pseudo-labels.
+        # predict_mix = student+CLIP weighted fusion, same signal as cls_loss.
+        # indices_greater = confident samples (diff > margin), cleaner teacher.
+        loss_proxy = -(predict_mix[indices_greater] * F.log_softmax(-neg_logits[indices_greater], dim=1)).sum(dim=1).mean()
+        loss_proxy = loss_proxy * 0.05
 
         m_base_sft = base_softmax_out.mean(dim=0)
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
