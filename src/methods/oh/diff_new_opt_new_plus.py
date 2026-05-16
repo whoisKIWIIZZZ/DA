@@ -714,23 +714,12 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
 
-        # Fine-tune proxy on target domain: consensus pseudo-labels (student+CLIP agree)
-        with torch.no_grad():
-            student_conf, student_pred = base_softmax_out.max(dim=1)
-            _, clip_pred = base_clip_all_output.max(dim=1)
-            consensus = (student_pred == clip_pred) & (student_conf > 0.8)
-        if consensus.sum() > 0:
-            neg_logits_conf = neg_logits[consensus]
-            pseudo_labels = student_pred[consensus]
-            target_proxy = torch.full_like(neg_logits_conf, 0.95)
-            target_proxy.scatter_(1, pseudo_labels.unsqueeze(1), 0.05)
-            loss_w_proxy = torch.ones_like(neg_logits_conf)
-            loss_w_proxy.scatter_(1, pseudo_labels.unsqueeze(1), 10.0)
-            loss_proxy = F.binary_cross_entropy_with_logits(
-                neg_logits_conf, target_proxy, weight=loss_w_proxy)
-            loss_proxy = loss_proxy * 0.1
-        else:
-            loss_proxy = torch.tensor(0.0).cuda()
+        # Fine-tune proxy via IID: align proxy_pos with student at batch level.
+        # proxy_pos = softmax(-neg_logits): "which class IS this" from proxy's neg-view.
+        # Batch-level joint matrix makes this robust to individual student errors.
+        proxy_pos = nn.Softmax(dim=1)(-neg_logits)
+        loss_proxy = IID_losses.IID_loss_old(proxy_pos, base_softmax_out.detach())
+        loss_proxy = loss_proxy * 0.1
 
         m_base_sft = base_softmax_out.mean(dim=0)
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
