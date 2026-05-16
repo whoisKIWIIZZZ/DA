@@ -273,7 +273,9 @@ def train_target(cfg):
 
             proxy_correction = torch.log(
                 (1.0 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
-            corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * proxy_correction.detach()
+            scale = new_clip.abs().mean() / (proxy_correction.abs().mean() + 1e-6)
+            corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * scale * proxy_correction.detach()
+            #corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * proxy_correction.detach()
             clip_score_sm = nn.Softmax(dim=1)(corrected_clip)
 
             _, clip_index_new = torch.max(corrected_clip, 1)
