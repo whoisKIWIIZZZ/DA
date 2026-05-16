@@ -255,7 +255,7 @@ def train_target(cfg):
         if cfg.ProDe.ARCH == 'RN50':
             inputs_test_clip = inputs_test_augs
         else:
-            inputs_test_clip = inputs_test
+            inputs_test_clip = inputs_test_augs
 
         clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new)
         clip_score = clip_score.float()
