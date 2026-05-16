@@ -273,9 +273,9 @@ def train_target(cfg):
 
             proxy_correction = torch.log(
                 (1.0 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
-            scale = new_clip.abs().mean() / (proxy_correction.abs().mean() + 1e-6)
-            corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * scale * proxy_correction.detach()
-            #corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * proxy_correction.detach()
+            proxy_correction_det = proxy_correction.detach()
+            scale = new_clip.abs().mean() / (proxy_correction_det.abs().mean() + 1e-6)
+            corrected_clip = new_clip + cfg.ProDe.PROXY_WEIGHT * scale * proxy_correction_det
             clip_score_sm = nn.Softmax(dim=1)(corrected_clip)
 
             _, clip_index_new = torch.max(corrected_clip, 1)
@@ -320,9 +320,8 @@ def train_target(cfg):
             proxy_loss.backward()
             optimizer_proxy.step()
 
-
-        logger.info(f"correction_norm={proxy_correction.abs().mean().item():.3f}, "
-            f"new_clip_norm={new_clip.abs().mean().item():.3f}")
+            logger.info(f"correction_norm={proxy_correction_det.abs().mean().item():.3f}, "
+                f"new_clip_norm={new_clip.abs().mean().item():.3f}")
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()

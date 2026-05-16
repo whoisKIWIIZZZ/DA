@@ -16,3 +16,14 @@ ACcase上,DIFO++的代码跑出来比他汇报的要好的多(73.2汇报,但跑�
 - netC的初始化.Kaiming初始化 vs 利用source语义的初始化有无区别?
 - 负类prompt的初始化.如果负类的not本身看起来不是一个重要的问题,有没有别的初始化方法?
 - 关于权重矩阵.difo++的思路是处理难样本,权重矩阵能不能进一步被设计,不难的时候就高权重,用来拟合ProDe?
+
+
+
+## 5.16
+- ProDe中logits bank存的是softmax,所以论文那个创新点完全是错的,他把CLIP直接变成了`CLIP+target`然后softmax然后IID loss.先不说这俩是不是在一个数量级,这么做有意义吗?我把那个减法改成了加法,效果完全一样
+```
+ outputs=nn.Softmax(dim=1)(outputs)
+logtis_bank[indx] = outputs.detach().clone()
+```
+- 发现CLIP否定prompt达不到一个好语义;尝试并成功在source域上训练了一个负类别的CLIP代理模型,本质就是一个小的MLP,接受CLIP图像head的特征然后输出一个65维度的分数,受到https://arxiv.org/pdf/2511.19147 这一篇的启发.
+
