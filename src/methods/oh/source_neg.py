@@ -65,23 +65,28 @@ def data_load(cfg, clip_preprocess):
     return dset_loaders
 
 
-class NegProxyMLP(nn.Module):
+class NegProxyLinear(nn.Module):
     """
-    Lightweight MLP that maps CLIP image features to N per-class
-    negativeness logits.  BCE training target: 0 for true class,
-    1 for all other classes (one-vs-rest negative classification).
+    Per-class linear negative classifiers on frozen CLIP features.
+    N independent binary classifiers: for class k, predicts whether
+    the image is NOT class k (=1) or IS class k (=0).
+
+    Single linear layer (no hidden) so that per-class gradients
+    are independent — the 64 "positive" classes don't drown out
+    the 1 "negative" class through a shared hidden representation.
+
+    Bias initialized negative → sigmoid starts < 0.5, which matches
+    the prior that most images are NOT most classes.
     """
-    def __init__(self, feat_dim, hidden_dim, num_classes, dropout=0.3):
+    def __init__(self, feat_dim, num_classes):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(feat_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
-        )
+        self.linear = nn.Linear(feat_dim, num_classes)
+        # Negative bias initialization: sigmoid(-1.0) ≈ 0.27 < 0.5
+        nn.init.constant_(self.linear.bias, -1.0)
+        nn.init.xavier_uniform_(self.linear.weight)
 
     def forward(self, x):
-        return self.net(x)
+        return self.linear(x)
 
 
 def eval_neg_proxy(loader, clip_model, mlp, cfg):
@@ -144,10 +149,9 @@ def train_neg_proxy(cfg):
     class_num = cfg.class_num
     logger.info(f"Source classes: {class_num}, feature dim: {feat_dim}")
 
-    # --- 3. Build MLP negative proxy ---
-    hidden_dim = 256
-    mlp = NegProxyMLP(feat_dim, hidden_dim, class_num).cuda()
-    logger.info(f"NegProxy MLP: {feat_dim} -> {hidden_dim} -> {class_num}")
+    # --- 3. Build negative proxy (single linear layer: per-class gradients independent) ---
+    mlp = NegProxyLinear(feat_dim, class_num).cuda()
+    logger.info(f"NegProxy: Linear({feat_dim} -> {class_num}), bias_init=-1.0")
 
     # --- 4. Optimizer ---
     optimizer = optim.Adam(mlp.parameters(), lr=1e-3, weight_decay=1e-4)
