@@ -7,7 +7,7 @@ from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
 from src.models import network
 from torch.utils.data import DataLoader
-from src.data.data_list import  ImageList_idx
+from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
 from sklearn.metrics import confusion_matrix
 import clip
 from src.utils.utils import *
@@ -40,9 +40,9 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
-    dsets["target"] = ImageList_idx(txt_tar, transform=image_train())
+    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["test"] = ImageList_idx(txt_test, transform=image_test())
+    dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
@@ -86,7 +86,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
             labels = data[1]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
@@ -175,7 +175,7 @@ def train_target(cfg):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
             indx=data[-1]
             inputs = inputs.cuda()
             output = netB(netF(inputs))
@@ -190,10 +190,10 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            inputs_test, _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            inputs_test, _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
 
         if inputs_test.size(0) == 1:
             continue
@@ -291,15 +291,17 @@ def obtain_label(loader, netF, netB, netC,text_inputs,text_features,clip_model):
         iter_test = iter(loader)
         for _ in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
+            inputs_clip = data[0][1]
             labels = data[1]
-            inputs = inputs.cuda() 
-            feas = netB(netF(inputs)) 
+            inputs = inputs.cuda()
+            inputs_clip = inputs_clip.cuda()
+            feas = netB(netF(inputs))
             outputs = netC(feas)
             if (text_features!=None):
-                clip_score = clip_text(clip_model,text_features,inputs)
+                clip_score = clip_text(clip_model,text_features,inputs_clip)
             else :
-                clip_score,_ = clip_model(inputs, text_inputs)
+                clip_score,_ = clip_model(inputs_clip, text_inputs)
 
             clip_score = clip_score.cpu()
             if start_test:
@@ -373,7 +375,7 @@ def cal_acc_js(loader, netF, netB, netC, clip_softmax):
         iter_test = iter(loader)
         for _ in range(len(loader)):
             data = next(iter_test)
-            inputs, labels = data[0].cuda(), data[1]
+            inputs, labels = data[0][0].cuda(), data[1]
 
             # target model
             logits_t = netC(netB(netF(inputs)))
