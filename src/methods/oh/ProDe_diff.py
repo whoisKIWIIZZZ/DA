@@ -282,7 +282,14 @@ def train_target(cfg):
             neg_logits = neg_proxy(feats_clip)
             neg_probs = torch.sigmoid(neg_logits)
             proxy_correction = torch.log((1 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
-            new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * (-neg_logits)
+
+            clip_pred = clip_score.argmax(dim=1)
+            netc_pred = outputs_test_new.argmax(dim=1)
+            disagree_mask = (netc_pred != clip_pred).float().unsqueeze(1)
+            clip_pred_neg = neg_probs.gather(1, clip_pred.unsqueeze(1))
+            proxy_weight = disagree_mask * clip_pred_neg
+
+            new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * proxy_weight * proxy_correction
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
         iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
@@ -299,15 +306,7 @@ def train_target(cfg):
             gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + cfg.ProDe.EPSILON))
             classifier_loss = classifier_loss - 0.1 * gentropy_loss
         pred = clip_index_new
-        with torch.no_grad():
-            pred_neg_prob = neg_probs.gather(1, clip_index_new.unsqueeze(1)).squeeze(1)
-            confident_mask = pred_neg_prob < 0.35
-        if confident_mask.sum() > 1:
-            entropy_loss = nn.CrossEntropyLoss()(
-                outputs_test[confident_mask],
-                clip_index_new[confident_mask])
-        else:
-            entropy_loss = nn.CrossEntropyLoss()(outputs_test, clip_index_new)
+        entropy_loss = nn.CrossEntropyLoss()(outputs_test, pred)
         classifier_loss =  cfg.ProDe.GENT_PAR*entropy_loss + classifier_loss
 
         optimizer.zero_grad()

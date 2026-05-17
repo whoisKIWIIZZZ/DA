@@ -340,6 +340,29 @@ def op_copy(optimizer):
     return optimizer
 
 
+def test_time_tuning(mypromt, inputs, optimizer, cfg, target_output):
+    target_output = target_output.cuda()
+    target_output = nn.Softmax(dim=1)(target_output)
+
+    for j in range(cfg.ProDe.TTA_STEPS):
+        with torch.amp.autocast('cuda'):
+            output_logits, _ = mypromt(inputs)
+            output = nn.Softmax(dim=1)(output_logits)
+            iic_loss = IID_losses.IID_loss_old(output, target_output)
+        optimizer.zero_grad()
+        iic_loss.backward()
+        optimizer.step()
+    return output
+
+def test_time_adapt_eval(input, mypromt, optimizer, optim_state, cfg, target_output):
+    optimizer.load_state_dict(optim_state)
+    output = test_time_tuning(mypromt, input, optimizer, cfg, target_output)
+    with torch.no_grad():
+        with torch.amp.autocast('cuda'):
+            logit_clip_score, text_features = mypromt(input)
+    return logit_clip_score, text_features
+
+
 def print_cfg(cfg):
     s = "==========================================\n"
     for arg, content in cfg.__dict__.items():
@@ -536,9 +559,12 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
 
     mypromt = promote_learning_diff_promote_learning(cfg, clip_model).to(clip_model.visual.conv1.weight.device)
-    # modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
-    # mypromt.prompt_learner.load_state_dict(torch.load(modelpath))
-   # mypromt.prompt_learner.ctx.register_hook(print_grad_hook)
+
+    prompt_parameters = [mypromt.prompt_learner.ctx]
+    opt_clip = torch.optim.SGD(prompt_parameters, cfg.OPTIM.LR, weight_decay=5e-4, momentum=0.9, nesterov=False)
+    opt_clip = op_copy(opt_clip)
+    optim_state_clip = deepcopy(opt_clip.state_dict())
+
     while iter_num < max_iter:
 
         current_aux = aux_begin + (aux_end - aux_begin) * (iter_num / max_iter)
@@ -588,39 +614,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             netC_aux.train()
 
 
-        logit_clip_score, text_features = mypromt(inputs_clip)
-        text_features_all = text_features
-        logit_clip_score_include_hidden = clip_text(clip_model, text_features_all, inputs_clip)
-        
-        # trainable_param = deepcopy(mypromt.prompt_learner.ctx)
-
-        if 'RN' in cfg.DIFF_ALIGN.ARCH:
-            prompt_lr = cfg.OPTIM.LR * 0.1
-            data_transform = image_test_50()
-        else:  # 走这一边
-            data_transform = image_test()
-            #prompt_lr = cfg.OPTIM.LR
-            if iter_num < 3000:
-                prompt_lr =cfg.OPTIM.LR
-            elif iter_num< 6000:
-                prompt_lr = 0.003
-            else:
-                prompt_lr = 0.001
-
-        try:
-            opt_clip.zero_grad()
-        except:
-            prompt_parameters = [mypromt.prompt_learner.ctx]
-            opt_clip = torch.optim.SGD(prompt_parameters, prompt_lr, weight_decay=5e-4, momentum=0.9,
-                                        nesterov=False)
-            opt_clip.zero_grad()
-            if mypromt.prompt_learner.ctx.grad is not None:
-                mypromt.prompt_learner.ctx.grad.data.zero_()
-
-        
         iter_num += 1
         lr_num = 2000 if cfg.SETTING.DATASET == 'office-home' else 10500
-        if iter_num < lr_num:  # 600,2000最好
+        if iter_num < lr_num:
             lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
         else:
             lr_scheduler2(optimizer, iter_num=iter_num, max_iter=max_iter)
@@ -631,6 +627,11 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         base_outputs_test = netC(features_classify)
         base_softmax_out = nn.Softmax(dim=1)(base_outputs_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
+
+        logit_clip_score, text_features = test_time_adapt_eval(
+            inputs_clip, mypromt, opt_clip, optim_state_clip, cfg, base_softmax_out.detach())
+        text_features_all = text_features
+        logit_clip_score_include_hidden = clip_text(clip_model, text_features_all, inputs_clip)
 
         source_score_bank[tar_idx] = 0.99*source_score_bank[tar_idx] + 0.01*target_score_bank[tar_idx]
         current_batch_scores = source_score_bank[tar_idx]
@@ -737,17 +738,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         opt_C.step()
         opt_aux.step()
         opt_proxy.step()
-        if use_clip:
-            if iter_num <  (max_iter/2):
-                with torch.no_grad():
-                    #opt_clip.step()
-                    promt_learning_rate = 0.002
-                    mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
-            else:
-                with torch.no_grad():
-                    #opt_clip.step()
-                    promt_learning_rate = 0.0001
-                    mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
