@@ -271,7 +271,7 @@ def train_target(cfg):
             neg_probs = torch.sigmoid(neg_logits)
 
         with torch.no_grad():
-            new_clip = (outputs_test_new - 1*neg_logits.cuda()) + clip_score.cuda()
+            new_clip = (outputs_test_new - 0*neg_logits.cuda()) + clip_score.cuda()
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
         iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)

@@ -247,8 +247,14 @@ def train_target(cfg):
         clip_score = clip_score.float()
 
         with torch.no_grad():
-            new_clip = (outputs_test_new - 0.1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
-            clip_score_sm = nn.Softmax(dim=1)(new_clip)
+            new_clip = (outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+            for name, t in [
+   		 ("outputs_test_new",   outputs_test_new),
+   		 ("logits_bank term",   1 * logtis_bank[tar_idx].cuda()),
+    		 ("clip_score",         clip_score.cuda()),
+		]:
+    	    	print(f"{name:20s} | mean_abs={t.abs().mean():.3e} | max_abs={t.abs().max():.3e}")
+	    clip_score_sm = nn.Softmax(dim=1)(new_clip)
         
         _,clip_index_new = torch.max(new_clip, 1)
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
