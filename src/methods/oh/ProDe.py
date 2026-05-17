@@ -247,7 +247,7 @@ def train_target(cfg):
         clip_score = clip_score.float()
 
         with torch.no_grad():
-            new_clip = clip_score.cuda()#(outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+            new_clip = (outputs_test_new - 0.1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
         #     for name, t in [
    		#  ("outputs_test_new",   outputs_test_new),
    		#  ("logits_bank term",   1 * logtis_bank[tar_idx].cuda()),
