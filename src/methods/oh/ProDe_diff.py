@@ -299,7 +299,15 @@ def train_target(cfg):
             gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + cfg.ProDe.EPSILON))
             classifier_loss = classifier_loss - 0.1 * gentropy_loss
         pred = clip_index_new
-        entropy_loss = nn.CrossEntropyLoss()(outputs_test, pred)
+        with torch.no_grad():
+            pred_neg_prob = neg_probs.gather(1, clip_index_new.unsqueeze(1)).squeeze(1)
+            confident_mask = pred_neg_prob < 0.35
+        if confident_mask.sum() > 1:
+            entropy_loss = nn.CrossEntropyLoss()(
+                outputs_test[confident_mask],
+                clip_index_new[confident_mask])
+        else:
+            entropy_loss = nn.CrossEntropyLoss()(outputs_test, clip_index_new)
         classifier_loss =  cfg.ProDe.GENT_PAR*entropy_loss + classifier_loss
 
         optimizer.zero_grad()
