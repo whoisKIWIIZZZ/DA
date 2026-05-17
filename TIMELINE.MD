@@ -26,4 +26,5 @@ ACcase上,DIFO++的代码跑出来比他汇报的要好的多(73.2汇报,但跑�
 logtis_bank[indx] = outputs.detach().clone()
 ```
 - 发现CLIP否定prompt达不到一个好语义;尝试并成功在source域上训练了一个负类别的CLIP代理模型,本质就是一个小的MLP,接受CLIP图像head的特征然后输出一个65维度的分数,受到https://arxiv.org/pdf/2511.19147 这一篇的启发.
+- DIFO++也是没用的.
 

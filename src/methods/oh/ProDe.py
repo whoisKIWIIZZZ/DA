@@ -44,9 +44,9 @@ def data_load(cfg):
         txt_test = txt_tar.copy()
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["test"] = ImageList_idx(txt_test, transform=image_test())
+    dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["source"] = ImageList_idx(txt_test, transform=image_test())
+    dsets["source"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["source"] = DataLoader(dsets["source"], batch_size=2, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=True)
     return dset_loaders
 
@@ -90,7 +90,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
             labels = data[1]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
@@ -213,12 +213,12 @@ def train_target(cfg):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0]
+            inputs = data[0][0]
             indx=data[-1]
             inputs = inputs.cuda()
             output = netB(netF(inputs))
             outputs = netC(output)
-            outputs=nn.Softmax(dim=1)(outputs)
+            #outputs=nn.Softmax(dim=1)(outputs)
             logtis_bank[indx] = outputs.detach().clone()
 
 
@@ -232,7 +232,7 @@ def train_target(cfg):
             continue
 
         inputs_test = inputs_test.cuda()
-        inputs_test_augs = inputs_test_augs[0].cuda() 
+        inputs_test_augs = inputs_test_augs.cuda()
 
         iter_num += 1
         lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
@@ -243,16 +243,11 @@ def train_target(cfg):
         with torch.no_grad():
             outputs_test_new = outputs_test.clone().detach()
 
-        if cfg.ProDe.ARCH == 'RN50':
-            inputs_test_clip = inputs_test_augs
-        else: 
-            inputs_test_clip = inputs_test
-
-        clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new)
+        clip_score = test_time_adapt_eval(inputs_test_augs, model, optimizer_ib, optim_state, cfg, outputs_test_new)
         clip_score = clip_score.float()
 
         with torch.no_grad():
-            new_clip = (outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+            new_clip = (outputs_test_new - 0.1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
             clip_score_sm = nn.Softmax(dim=1)(new_clip)
         
         _,clip_index_new = torch.max(new_clip, 1)
