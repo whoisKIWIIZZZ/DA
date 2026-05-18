@@ -61,6 +61,7 @@ if __name__ == "__main__":
     load_cfg_from_args()
 
     print("+++++++++++++++++++IB+++++++++++++++++++++")
+    print("cfg.MODEL.METHOD:{}".format(cfg.MODEL.METHOD))
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.GPU_ID #在conf.py中使用    cfg.type = cfg.domain
     cfg.t_dset_path = cfg.FOLDER + cfg.SETTING.DATASET + '/' + cfg.domain[cfg.SETTING.T] + '_list.txt'
     cfg.test_dset_path = cfg.FOLDER + cfg.SETTING.DATASET + '/' + cfg.domain[cfg.SETTING.T] + '_list.txt'
