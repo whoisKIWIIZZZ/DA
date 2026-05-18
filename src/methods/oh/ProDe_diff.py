@@ -289,14 +289,8 @@ def train_target(cfg):
             clip_pred_neg = neg_probs.gather(1, clip_pred.unsqueeze(1))
             proxy_weight = disagree_mask * clip_pred_neg
 
-        # Exponential random fusion: annealed blend between student and CLIP logits
-        abulations = 1 * iter_num / max_iter + 0.1
-        data = np.random.exponential(scale=abulations, size=outputs_test_new.shape[0])
-        data = np.clip(data, 0, 1)
-        data = torch.from_numpy(data).float().cuda().unsqueeze(1)
-        iid_clip = outputs_test_new - logtis_bank[tar_idx].cuda() + clip_score.cuda()+ cfg.ProDe.PROXY_WEIGHT * proxy_weight * proxy_correction
-        new_clip = data * outputs_test_new + (1 - data) * clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * proxy_weight * proxy_correction
-        clip_score_sm = nn.Softmax(dim=1)(iid_clip)
+            new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * proxy_weight * proxy_correction
+        clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
         iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
