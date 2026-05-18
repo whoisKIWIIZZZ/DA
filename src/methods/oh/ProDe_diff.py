@@ -308,7 +308,7 @@ def train_target(cfg):
         outputs_proxy2N = netC_proxy(features_test)
         softmax_out_2N = nn.Softmax(dim=1)(outputs_proxy2N)
         with torch.no_grad():
-            clip_softmax_2N = torch.cat([nn.Softmax(dim=1)(clip_score), nn.Softmax(dim=1)(neg_logits)], dim=1) 
+            clip_softmax_2N = torch.cat([clip_score_sm, nn.Softmax(dim=1)(neg_logits)], dim=1) 
         iic_loss, _ = IID_losses.IID_loss(cfg.class_num, softmax_out_2N, clip_softmax_2N,
                                           w_base=1.0, w_aux=0.5, bn=-0.3, lamb=1.0)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
