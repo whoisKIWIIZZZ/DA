@@ -189,6 +189,15 @@ def train_target(cfg):
     modelpath = cfg.output_dir_src + '/source_C.pt'
     netC.load_state_dict(torch.load(modelpath))
 
+    # --- netC_proxy: N+N classifier for IID loss ---
+    netC_proxy = network.feat_classifier(type='wn', class_num=cfg.class_num * 2, bottleneck_dim=cfg.bottleneck).cuda()
+    with torch.no_grad():
+        netC_proxy.fc.weight_g.data[:cfg.class_num].copy_(netC.fc.weight_g.data)
+        netC_proxy.fc.weight_v.data[:cfg.class_num].copy_(netC.fc.weight_v.data)
+        netC_proxy.fc.bias.data[:cfg.class_num].copy_(netC.fc.bias.data)
+        torch.nn.init.kaiming_uniform_(netC_proxy.fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
+        netC_proxy.fc.bias.data[cfg.class_num:].fill_(-3.0)
+
     # --- NegProxy: learnable negative proxy for CLIP logit correction ---
     feat_dim_proxy = model.image_encoder.output_dim
     neg_proxy = NegProxyLinear(feat_dim_proxy, cfg.class_num).cuda()
@@ -227,6 +236,8 @@ def train_target(cfg):
     optimizer = op_copy(optimizer)
     optimizer_ib = optim.SGD(param_group_ib)
     optimizer_ib = op_copy(optimizer_ib)
+    opt_proxyC = optim.SGD([{'params': netC_proxy.parameters(), 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}])
+    opt_proxyC = op_copy(opt_proxyC)
     optim_state = deepcopy(optimizer_ib.state_dict())
     model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
@@ -292,7 +303,14 @@ def train_target(cfg):
             new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * proxy_weight * proxy_correction
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
-        iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
+
+        # N+N IID loss: netC_proxy (base+proxy head) vs CLIP+neg_proxy concat
+        outputs_proxy2N = netC_proxy(features_test)
+        softmax_out_2N = nn.Softmax(dim=1)(outputs_proxy2N)
+        with torch.no_grad():
+            clip_softmax_2N = torch.cat([clip_score_sm, nn.Softmax(dim=1)(neg_logits)], dim=1) 
+        iic_loss, _ = IID_losses.IID_loss(cfg.class_num, softmax_out_2N, clip_softmax_2N,
+                                          w_base=1.0, w_aux=0.5, bn=-0.3, lamb=1.0)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
 
@@ -311,9 +329,11 @@ def train_target(cfg):
 
         optimizer.zero_grad()
         optimizer_ib.zero_grad()
+        opt_proxyC.zero_grad()
         classifier_loss.backward()
         optimizer.step()
         optimizer_ib.step()
+        opt_proxyC.step()
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
