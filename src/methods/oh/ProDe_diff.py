@@ -290,7 +290,7 @@ def train_target(cfg):
             proxy_weight = disagree_mask * clip_pred_neg
 
         # Exponential random fusion: annealed blend between student and CLIP logits
-        abulations = cfg.ProDe.BETA1 * iter_num / max_iter + cfg.ProDe.BETA2
+        abulations = 1 * iter_num / max_iter + 0.1
         data = np.random.exponential(scale=abulations, size=outputs_test_new.shape[0])
         data = np.clip(data, 0, 1)
         data = torch.from_numpy(data).float().cuda().unsqueeze(1)
