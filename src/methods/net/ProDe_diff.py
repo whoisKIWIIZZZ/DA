@@ -603,8 +603,8 @@ def train_target(cfg):
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             base_model.eval()
             model.eval()
-            if iter_num == max_iter:
-                analyze_ensemble(cfg, base_model, model, negative_text_features, test_data_loader)
+            # if iter_num == max_iter:
+            analyze_ensemble(cfg, base_model, model, negative_text_features, test_data_loader)
             clip_acc = cal_clip_acc(test_data_loader, model, negative_text_features, class_num)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(test_data_loader, base_model, True)
