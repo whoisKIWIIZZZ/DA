@@ -66,7 +66,7 @@ def evaluate_zeroshot_neg(cfg):
         neg_text_feats = clip_model.encode_text(neg_tokens)
         neg_text_feats = neg_text_feats / neg_text_feats.norm(dim=-1, keepdim=True)
 
-        logit_scale = clip_model.logit_scale.exp()
+        logit_scale = clip_model.logit_scale.exp().item()
 
     # Data
     dset_loaders = data_load(cfg)
@@ -193,7 +193,7 @@ def evaluate_semantic_prior(cfg):
         class_sim.fill_diagonal_(0)
         class_sim = class_sim / (class_sim.sum(dim=1, keepdim=True) + 1e-6)
 
-        logit_scale = clip_model.logit_scale.exp()
+        logit_scale = clip_model.logit_scale.exp().item()
 
     logger.info("class_sim stats: diag_removed, row_normed, "
                 f"max={class_sim.max().item():.3f}, mean={class_sim.mean().item():.4f}")
