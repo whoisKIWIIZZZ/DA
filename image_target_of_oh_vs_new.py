@@ -18,7 +18,7 @@ import src.methods.oh.difo_50 as DIFO_50
 import src.methods.oh.diffadd_new_opt_old  as DIFFOPT
 #import src.methods.oh.diffadd_new_opt_50  as DIFFOPT_50
 import src.methods.oh.ProDe as ProDe
-import src.methods.oh.ProDe_diff_0518 as ProDe_diff
+import src.methods.oh.ProDe_diff as ProDe_diff
 import src.methods.oh.diff_new_opt_new_50 as DIFF_ALIGN_50
 import src.methods.oh.diff_new_opt_new as DIFF_ALIGN
 import src.methods.oh.diff_new_opt_new_plus as DIFF_ALIGN_PLUS

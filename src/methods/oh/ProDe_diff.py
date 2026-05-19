@@ -221,6 +221,22 @@ def analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders):
         top_str = ' | '.join(f"c{i}({class_counts[i].item()})" for i in top5 if class_counts[i] > 0)
         logger.info(f"both_wrong top classes: {top_str}")
 
+        # Top-k analysis on diff_error (both wrong, different mistakes)
+        bw_diff = both_wrong & (src_pred != clip_pred)
+        nd = bw_diff.sum().item()
+        if nd > 0:
+            bw_diff_src_logits = src_logits[bw_diff]
+            bw_diff_clip_logits = clip_logits[bw_diff]
+            bw_diff_labels = labels[bw_diff]
+            for k in [2, 3, 5]:
+                src_topk = bw_diff_src_logits.topk(k, dim=1).indices
+                clip_topk = bw_diff_clip_logits.topk(k, dim=1).indices
+                gt = bw_diff_labels.unsqueeze(1)
+                src_hit = (src_topk == gt).any(1).float().mean().item() * 100
+                clip_hit = (clip_topk == gt).any(1).float().mean().item() * 100
+                union = ((src_topk == gt).any(1) | (clip_topk == gt).any(1)).float().mean().item() * 100
+                logger.info(f"diff_error({nd}): top-{k} src={src_hit:.1f}% clip={clip_hit:.1f}% union={union:.1f}%")
+
 
 def train_target(cfg):
     text_inputs = clip_pre_text(cfg)
