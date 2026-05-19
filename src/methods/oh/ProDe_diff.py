@@ -151,6 +151,77 @@ def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_outpu
             output,_ = model(input)
     return output
 
+@torch.no_grad()
+def analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders):
+    text_feats = model.get_text_features()
+    logit_scale = model.logit_scale.exp()
+
+    all_src_logits = []
+    all_clip_logits = []
+    all_labels = []
+
+    for data in dset_loaders["test"]:
+        inputs = data[0][0].cuda()
+        labels = data[1]
+        indx = data[-1]
+
+        src_logits = netC(netB(netF(inputs))).cpu()
+
+        img_feats = model.image_encoder(inputs.type(model.dtype))
+        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+        clip_logits = (logit_scale * img_feats @ text_feats.t()).cpu()
+
+        all_src_logits.append(src_logits)
+        all_clip_logits.append(clip_logits)
+        all_labels.append(labels)
+
+    src_logits = torch.cat(all_src_logits)
+    clip_logits = torch.cat(all_clip_logits)
+    labels = torch.cat(all_labels)
+
+    src_pred = src_logits.argmax(1)
+    clip_pred = clip_logits.argmax(1)
+    ensemble_pred = (src_logits + clip_logits).argmax(1)
+
+    src_acc = (src_pred == labels).float().mean().item() * 100
+    clip_acc = (clip_pred == labels).float().mean().item() * 100
+    ens_acc = (ensemble_pred == labels).float().mean().item() * 100
+
+    correct_src = (src_pred == labels)
+    correct_clip = (clip_pred == labels)
+    correct_ens = (ensemble_pred == labels)
+
+    both_right = correct_clip & correct_src
+    clip_only = correct_clip & ~correct_src
+    src_only = ~correct_clip & correct_src
+    both_wrong = ~correct_clip & ~correct_src
+
+    n = len(labels)
+    bw = both_wrong.sum().item()
+    logger.info("Ensemble Analysis "
+                f"src={src_acc:.1f}% clip={clip_acc:.1f}% ens={ens_acc:.1f}% | "
+                f"both_right={both_right.sum().item()} clip_only={clip_only.sum().item()} "
+                f"src_only={src_only.sum().item()} both_wrong={bw}")
+
+    if bw > 0:
+        bw_same = (src_pred[both_wrong] == clip_pred[both_wrong])
+        logger.info(f"both_wrong={bw}: same_error={bw_same.sum().item()}/{bw} "
+                    f"({bw_same.float().mean().item()*100:.1f}%)")
+
+        bw_ens_fixed = (both_wrong & correct_ens).sum().item()
+        logger.info(f"Ensemble fixes {bw_ens_fixed}/{bw} both_wrong "
+                    f"({bw_ens_fixed/bw*100:.1f}%) | "
+                    f"side_effect: clip_only_broken={(clip_only & ~correct_ens).sum().item()}, "
+                    f"src_only_broken={(src_only & ~correct_ens).sum().item()}")
+
+        # Per-class both_wrong count (top 5)
+        bw_labels = labels[both_wrong]
+        class_counts = torch.bincount(bw_labels, minlength=cfg.class_num)
+        top5 = class_counts.argsort(descending=True)[:5]
+        top_str = ' | '.join(f"c{i}({class_counts[i].item()})" for i in top5 if class_counts[i] > 0)
+        logger.info(f"both_wrong top classes: {top_str}")
+
+
 def train_target(cfg):
     text_inputs = clip_pre_text(cfg)
     dset_loaders = data_load(cfg)
@@ -335,6 +406,7 @@ def train_target(cfg):
                 class_sim = text_feats @ text_feats.T
                 class_sim.fill_diagonal_(0)
                 class_sim = class_sim / (class_sim.sum(dim=1, keepdim=True) + 1e-6)
+            analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss) + '\n' + acc_list
