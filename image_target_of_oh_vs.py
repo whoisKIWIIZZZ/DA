@@ -19,6 +19,7 @@ import src.methods.oh.difo_50 as DIFO_50
 import src.methods.oh.plue as PLUE
 import src.methods.oh.adacontrast as ADACONTRAST
 import src.methods.oh.source as SOURCE
+import src.methods.oh.zeroshot_neg_test as ZSNEG
 from conf import cfg, load_cfg_from_args
 
 
@@ -105,6 +106,10 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "source":
         print("training source model")
         acc = SOURCE.train_source(cfg)
+
+    elif cfg.MODEL.METHOD == "zeroshot_neg":
+        print("testing zero-shot negative prompts")
+        ZSNEG.evaluate_zeroshot_neg(cfg)
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))

@@ -28,6 +28,7 @@ import src.methods.oh.source_neg as SOURCE_NEG
 import src.methods.oh.plue as PLUE
 import src.methods.oh.adacontrast as ADACONTRAST
 import src.methods.oh.source as SOURCE
+import src.methods.oh.zeroshot_neg_test as ZSNEG
 import src.utils.plot as PLOT
 import src.methods.oh.difo_plus as DIFO_PLUS
 import src.methods.oh.difo_plus_partial as DIFO_PLUS_PARTIAL
@@ -210,6 +211,10 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "ProDe_open":
         print("using ProDe_open method")
         acc = PRODE_OPEN.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "zeroshot_neg":
+        print("testing zero-shot negative prompts")
+        ZSNEG.evaluate_zeroshot_neg(cfg)
 
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))
