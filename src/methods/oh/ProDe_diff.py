@@ -196,6 +196,27 @@ def analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders):
     src_only = ~correct_clip & correct_src
     both_wrong = ~correct_clip & ~correct_src
 
+    # ---- Normalization strategies for scale alignment ----
+    s_mean = src_logits.mean(1, keepdim=True)
+    s_std = src_logits.std(1, keepdim=True)
+    c_mean = clip_logits.mean(1, keepdim=True)
+    c_std = clip_logits.std(1, keepdim=True)
+    s_min = src_logits.min(1, keepdim=True).values
+    s_max = src_logits.max(1, keepdim=True).values
+    c_min = clip_logits.min(1, keepdim=True).values
+    c_max = clip_logits.max(1, keepdim=True).values
+    logger.info(f"Scale stats: src mean={s_mean.mean().item():.1f} std={s_std.mean().item():.1f} | "
+                f"clip mean={c_mean.mean().item():.1f} std={c_std.mean().item():.1f}")
+    logger.info("Ensemble normalization comparison:")
+    for name, ens in [
+        ("raw", src_logits + clip_logits),
+        ("z-score", (src_logits - s_mean) / (s_std + 1e-6) + (clip_logits - c_mean) / (c_std + 1e-6)),
+        ("minmax", (src_logits - s_min) / (s_max - s_min + 1e-6) + (clip_logits - c_min) / (c_max - c_min + 1e-6)),
+        ("prob", torch.softmax(src_logits, dim=1) + torch.softmax(clip_logits, dim=1)),
+    ]:
+        acc = (ens.argmax(1) == labels).float().mean().item() * 100
+        logger.info(f"  ens_{name}: {acc:.2f}%")
+
     n = len(labels)
     bw = both_wrong.sum().item()
     logger.info("Ensemble Analysis "
