@@ -145,7 +145,7 @@ def test_time_tuning(model, inputs, optimizer, cfg, target_output,
         iic_loss.backward()
         optimizer.step()
 
-        neg_logits = neg_proxy(feats_clip)
+        neg_logits,_ = neg_proxy(feats_clip)
         proxy_target = 1.0 - target_output
         proxy_loss_tta = F.binary_cross_entropy_with_logits(neg_logits, proxy_target)
         optimizer_proxy.zero_grad()
@@ -279,7 +279,7 @@ def train_target(cfg):
         with torch.no_grad():
             feats_clip = model.image_encoder(inputs_test_clip.type(model.dtype)).float()
             feats_clip = feats_clip / feats_clip.norm(dim=-1, keepdim=True)
-            neg_logits = neg_proxy(feats_clip)
+            neg_logits,_ = neg_proxy(feats_clip)
             neg_probs = torch.sigmoid(neg_logits)
             proxy_correction = torch.log((1 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
 
