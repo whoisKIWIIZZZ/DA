@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -48,8 +49,8 @@ def neg_proxy_loss(
     labels:      torch.Tensor,   # (B,)
     margin:      float = 2.0,
     alpha:       float = 0.3,
-    noise_feats: torch.Tensor | None = None,   # augmented feats for consistency
-    mlp:         nn.Module | None = None,
+    noise_feats: Optional[torch.Tensor] = None,   # augmented feats for consistency
+    mlp:         Optional[nn.Module] = None,
     lambda_dc:   float = 0.1,
 ) -> torch.Tensor:
     """
@@ -144,8 +145,13 @@ def eval_neg_proxy(loader, clip_model, mlp, cfg):
     return rank1_correct / n * 100, mean_rank_sum / n
 
 
+# ---------------------------------------------------------------------------
+# Training entry-point  (name unchanged)
+# ---------------------------------------------------------------------------
 
 def train_neg_proxy(cfg):
+    logger.info("=== Approach B: Training CLIP Negative Proxy (v2) ===")
+
     # 1. Frozen CLIP backbone
     import clip
     arch        = getattr(getattr(cfg, 'DIFF_ALIGN', None), 'ARCH', None) or 'ViT-B/32'
