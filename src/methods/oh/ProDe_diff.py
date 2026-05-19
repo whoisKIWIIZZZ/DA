@@ -268,6 +268,8 @@ def train_target(cfg):
             res = neg_prior - p
 
             residual = torch.log((p - 0.1 * res).clamp(min=1e-6)) - torch.log(p.clamp(min=1e-6))
+            # Scale log-prob residual to logit space (logit_scale ≈ 100 for ViT-B/32)
+            residual = residual * model.logit_scale.exp()
 
             term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
             term_b = clip_score.cuda()
