@@ -200,6 +200,152 @@ def test_time_adapt_eval_diff(inputs, model, optimizer, optim_state, cfg, target
     return output_logits
 
 
+@torch.no_grad()
+def analyze_ensemble(cfg, base_model, model, negative_text_features, test_data_loader):
+    class_num = cfg.class_num
+    text_feats_N = model.get_text_features()
+    logit_scale = model.logit_scale.exp()
+
+    all_src_logits = []
+    all_clip_logits = []
+    all_labels = []
+
+    for data in test_data_loader:
+        inputs = data[0].cuda()
+        labels = data[1]
+
+        src_logits = base_model(inputs).cpu()
+
+        img_feats = model.image_encoder(inputs.type(model.dtype))
+        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+        clip_logits_N = (logit_scale * img_feats @ text_feats_N.t()).cpu()
+
+        all_src_logits.append(src_logits)
+        all_clip_logits.append(clip_logits_N)
+        all_labels.append(labels)
+
+    src_logits = torch.cat(all_src_logits)
+    clip_logits = torch.cat(all_clip_logits)
+    labels = torch.cat(all_labels)
+
+    src_pred = src_logits.argmax(1)
+    clip_pred = clip_logits.argmax(1)
+    ensemble_pred = (src_logits + clip_logits).argmax(1)
+
+    src_acc = (src_pred == labels).float().mean().item() * 100
+    clip_acc = (clip_pred == labels).float().mean().item() * 100
+    ens_acc = (ensemble_pred == labels).float().mean().item() * 100
+
+    correct_src = (src_pred == labels)
+    correct_clip = (clip_pred == labels)
+    correct_ens = (ensemble_pred == labels)
+
+    both_right = correct_clip & correct_src
+    clip_only = correct_clip & ~correct_src
+    src_only = ~correct_clip & correct_src
+    both_wrong = ~correct_clip & ~correct_src
+
+    n = len(labels)
+    bw = both_wrong.sum().item()
+    bw_diff = both_wrong & (src_pred != clip_pred)
+    nd = bw_diff.sum().item()
+
+    logger.info("Ensemble Analysis "
+                f"src={src_acc:.1f}% clip={clip_acc:.1f}% ens={ens_acc:.1f}% | "
+                f"both_right={both_right.sum().item()} clip_only={clip_only.sum().item()} "
+                f"src_only={src_only.sum().item()} both_wrong={bw}")
+
+    if bw > 0:
+        bw_same = (src_pred[both_wrong] == clip_pred[both_wrong])
+        logger.info(f"both_wrong={bw}: same_error={bw_same.sum().item()}/{bw} "
+                    f"({bw_same.float().mean().item()*100:.1f}%)")
+
+        bw_ens_fixed = (both_wrong & correct_ens).sum().item()
+        logger.info(f"Ensemble fixes {bw_ens_fixed}/{bw} both_wrong "
+                    f"({bw_ens_fixed/bw*100:.1f}%) | "
+                    f"side_effect: clip_only_broken={(clip_only & ~correct_ens).sum().item()}, "
+                    f"src_only_broken={(src_only & ~correct_ens).sum().item()}")
+
+    # Top-k analysis on diff_error
+    if nd > 0:
+        bw_diff_src_logits = src_logits[bw_diff]
+        bw_diff_clip_logits = clip_logits[bw_diff]
+        bw_diff_labels = labels[bw_diff]
+        for k in [2, 3, 5]:
+            src_topk = bw_diff_src_logits.topk(k, dim=1).indices
+            clip_topk = bw_diff_clip_logits.topk(k, dim=1).indices
+            gt = bw_diff_labels.unsqueeze(1)
+            src_hit = (src_topk == gt).any(1).float().mean().item() * 100
+            clip_hit = (clip_topk == gt).any(1).float().mean().item() * 100
+            union = ((src_topk == gt).any(1) | (clip_topk == gt).any(1)).float().mean().item() * 100
+            logger.info(f"diff_error({nd}): top-{k} src={src_hit:.1f}% clip={clip_hit:.1f}% union={union:.1f}%")
+
+    # Oracle experiments
+    oracle_pred = torch.where(correct_clip, clip_pred, src_pred)
+    oracle_acc = (oracle_pred == labels).float().mean().item() * 100
+    logger.info(f"Oracle (pick correct model): {oracle_acc:.1f}%")
+
+    if bw > 0:
+        src_top5 = src_logits[both_wrong].topk(5, dim=1).indices
+        clip_top5 = clip_logits[both_wrong].topk(5, dim=1).indices
+        bw_labels = labels[both_wrong]
+        hits = []
+        for i in range(bw):
+            union_set = set(src_top5[i].tolist()) | set(clip_top5[i].tolist())
+            hits.append(bw_labels[i].item() in union_set)
+        union_top5_hit = torch.tensor(hits).float().mean().item() * 100
+        logger.info(f"both_wrong({bw}): union top-5 contains true = {union_top5_hit:.1f}% "
+                    f"({int(union_top5_hit/100*bw)}/{bw})")
+        if nd > 0:
+            src_top5_d = src_logits[bw_diff].topk(5, dim=1).indices
+            clip_top5_d = clip_logits[bw_diff].topk(5, dim=1).indices
+            hits_d = []
+            for i in range(nd):
+                union_set = set(src_top5_d[i].tolist()) | set(clip_top5_d[i].tolist())
+                hits_d.append(bw_diff_labels[i].item() in union_set)
+            union_top5_d_hit = torch.tensor(hits_d).float().mean().item() * 100
+            logger.info(f"diff_error({nd}): union top-5 contains true = {union_top5_d_hit:.1f}% "
+                        f"({int(union_top5_d_hit/100*nd)}/{nd})")
+
+    # Confidence-based routing
+    src_prob = torch.softmax(src_logits, dim=1)
+    clip_prob = torch.softmax(clip_logits, dim=1)
+    src_top2 = src_logits.topk(2, dim=1).values
+    clip_top2 = clip_logits.topk(2, dim=1).values
+    margin_src = src_top2[:, 0] - src_top2[:, 1]
+    margin_clip = clip_top2[:, 0] - clip_top2[:, 1]
+    ent_src = -(src_prob * torch.log(src_prob + 1e-6)).sum(1)
+    ent_clip = -(clip_prob * torch.log(clip_prob + 1e-6)).sum(1)
+    agree = (src_pred == clip_pred).float()
+
+    w_clip_m = margin_clip / (margin_clip + margin_src + 1e-6)
+    routed_m = w_clip_m.unsqueeze(1) * clip_logits + (1 - w_clip_m).unsqueeze(1) * src_logits
+    routem_acc = (routed_m.argmax(1) == labels).float().mean().item() * 100
+
+    w_clip_e = (1 / (ent_clip + 1e-6)) / ((1 / (ent_src + 1e-6)) + (1 / (ent_clip + 1e-6)) + 1e-6)
+    routed_e = w_clip_e.unsqueeze(1) * clip_logits + (1 - w_clip_e).unsqueeze(1) * src_logits
+    routee_acc = (routed_e.argmax(1) == labels).float().mean().item() * 100
+
+    more_confident = (margin_clip > margin_src).float()
+    routed_a = torch.where(agree.bool().unsqueeze(1),
+                           (src_logits + clip_logits) / 2,
+                           torch.where((more_confident == 1).unsqueeze(1), clip_logits, src_logits))
+    routea_acc = (routed_a.argmax(1) == labels).float().mean().item() * 100
+
+    more_confident_e = (ent_clip < ent_src).float()
+    routed_ae = torch.where(agree.bool().unsqueeze(1),
+                            (src_logits + clip_logits) / 2,
+                            torch.where((more_confident_e == 1).unsqueeze(1), clip_logits, src_logits))
+    routeae_acc = (routed_ae.argmax(1) == labels).float().mean().item() * 100
+
+    logger.info(f"Routing: margin={routem_acc:.1f}% entropy={routee_acc:.1f}% "
+                f"agree+margin={routea_acc:.1f}% agree+ent={routeae_acc:.1f}% "
+                f"vs ens={ens_acc:.1f}% oracle={oracle_acc:.1f}%")
+
+    logger.info(f"\n=== Summary: src={src_acc:.1f}% clip={clip_acc:.1f}% ens={ens_acc:.1f}% "
+                f"oracle={oracle_acc:.1f}% | both_wrong={bw} diff_error={nd} ===\n")
+
+
 def train_target(cfg):
     class_num_hidden = cfg.class_num_hidden
     class_num = cfg.class_num
@@ -457,6 +603,8 @@ def train_target(cfg):
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             base_model.eval()
             model.eval()
+            if iter_num == max_iter:
+                analyze_ensemble(cfg, base_model, model, negative_text_features, test_data_loader)
             clip_acc = cal_clip_acc(test_data_loader, model, negative_text_features, class_num)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(test_data_loader, base_model, True)
