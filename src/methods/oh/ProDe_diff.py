@@ -278,7 +278,7 @@ def train_target(cfg):
             clip_softmax_2N = nn.Softmax(dim=1)(clip_logits_2N)
         # iic_loss, _ = IID_losses.IID_loss(cfg.class_num, softmax_out_2N, clip_softmax_2N,
         #                                   w_base=1.0, w_aux=0.5, bn=-0.3, lamb=1.0)
-            iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score)
+            iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
 
