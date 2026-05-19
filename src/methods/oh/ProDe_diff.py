@@ -237,6 +237,50 @@ def analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders):
                 union = ((src_topk == gt).any(1) | (clip_topk == gt).any(1)).float().mean().item() * 100
                 logger.info(f"diff_error({nd}): top-{k} src={src_hit:.1f}% clip={clip_hit:.1f}% union={union:.1f}%")
 
+        # ---- Oracle experiments ----
+        # 1. Oracle: pick the model that is correct (upper bound for reliability estimation)
+        oracle_pred = torch.where(correct_clip, clip_pred, src_pred)
+        oracle_acc = (oracle_pred == labels).float().mean().item() * 100
+        logger.info(f"Oracle (pick correct model): {oracle_acc:.2f}%")
+
+        # 2. Oracle: per-sample, pick which model to trust (clip or src)
+        n_samples = len(labels)
+        n_clip_right_src_wrong = (~correct_src & correct_clip).sum().item()
+        n_src_right_clip_wrong = (correct_src & ~correct_clip).sum().item()
+        logger.info(f"Reliability oracle: clip_right_src_wrong={n_clip_right_src_wrong} "
+                    f"src_right_clip_wrong={n_src_right_clip_wrong} "
+                    f"gain_if_perfect={n_clip_right_src_wrong + n_src_right_clip_wrong} "
+                    f"({(n_clip_right_src_wrong + n_src_right_clip_wrong)/n_samples*100:.1f}%)")
+
+        # 3. Oracle top-k union on both_wrong (can re-ranking in top-k union solve it?)
+        if bw > 0:
+            src_top5 = src_logits[both_wrong].topk(5, dim=1).indices
+            clip_top5 = clip_logits[both_wrong].topk(5, dim=1).indices
+            bw_labels = labels[both_wrong]
+            hits = []
+            for i in range(bw):
+                union_set = set(src_top5[i].tolist()) | set(clip_top5[i].tolist())
+                hits.append(bw_labels[i].item() in union_set)
+            union_top5_hit = torch.tensor(hits).float().mean().item() * 100
+            logger.info(f"both_wrong({bw}): union top-5 contains true = {union_top5_hit:.1f}% "
+                        f"({int(union_top5_hit/100*bw)}/{bw})")
+
+            # Among diff_error specifically
+            if nd > 0:
+                src_top5_d = src_logits[bw_diff].topk(5, dim=1).indices
+                clip_top5_d = clip_logits[bw_diff].topk(5, dim=1).indices
+                bw_diff_labels = labels[bw_diff]
+                hits_d = []
+                for i in range(nd):
+                    union_set = set(src_top5_d[i].tolist()) | set(clip_top5_d[i].tolist())
+                    hits_d.append(bw_diff_labels[i].item() in union_set)
+                union_top5_d_hit = torch.tensor(hits_d).float().mean().item() * 100
+                logger.info(f"diff_error({nd}): union top-5 contains true = {union_top5_d_hit:.1f}% "
+                            f"({int(union_top5_d_hit/100*nd)}/{nd})")
+
+        logger.info(f"\n=== Summary: src={src_acc:.1f}% clip={clip_acc:.1f}% ens={ens_acc:.1f}% "
+                    f"oracle={oracle_acc:.1f}% | both_wrong={bw} diff_error={bw_diff.sum().item() if bw>0 else 0} ===\n")
+
 
 def train_target(cfg):
     text_inputs = clip_pre_text(cfg)
