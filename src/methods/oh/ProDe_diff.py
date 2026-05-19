@@ -278,6 +278,45 @@ def analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders):
                 logger.info(f"diff_error({nd}): union top-5 contains true = {union_top5_d_hit:.1f}% "
                             f"({int(union_top5_d_hit/100*nd)}/{nd})")
 
+        # ---- Confidence-based routing (margin, entropy, agreement) ----
+        src_prob = torch.softmax(src_logits, dim=1)
+        clip_prob = torch.softmax(clip_logits, dim=1)
+        src_top2 = src_logits.topk(2, dim=1).values
+        clip_top2 = clip_logits.topk(2, dim=1).values
+        margin_src = src_top2[:, 0] - src_top2[:, 1]
+        margin_clip = clip_top2[:, 0] - clip_top2[:, 1]
+        ent_src = -(src_prob * torch.log(src_prob + 1e-6)).sum(1)
+        ent_clip = -(clip_prob * torch.log(clip_prob + 1e-6)).sum(1)
+        agree = (src_pred == clip_pred).float()
+
+        # Router 1: margin-based
+        w_clip_m = margin_clip / (margin_clip + margin_src + 1e-6)
+        routed_m = w_clip_m.unsqueeze(1) * clip_logits + (1 - w_clip_m).unsqueeze(1) * src_logits
+        routem_acc = (routed_m.argmax(1) == labels).float().mean().item() * 100
+
+        # Router 2: entropy-based (lower entropy = more confident)
+        w_clip_e = (1 / (ent_clip + 1e-6)) / ((1 / (ent_src + 1e-6)) + (1 / (ent_clip + 1e-6)) + 1e-6)
+        routed_e = w_clip_e.unsqueeze(1) * clip_logits + (1 - w_clip_e).unsqueeze(1) * src_logits
+        routee_acc = (routed_e.argmax(1) == labels).float().mean().item() * 100
+
+        # Router 3: agreement-gated (disagree -> pick more confident)
+        more_confident = (margin_clip > margin_src).float()
+        routed_a = torch.where(agree.bool().unsqueeze(1),
+                               (src_logits + clip_logits) / 2,
+                               torch.where((more_confident == 1).unsqueeze(1), clip_logits, src_logits))
+        routea_acc = (routed_a.argmax(1) == labels).float().mean().item() * 100
+
+        # Router 4: agreement-gated with entropy
+        more_confident_e = (ent_clip < ent_src).float()
+        routed_ae = torch.where(agree.bool().unsqueeze(1),
+                                (src_logits + clip_logits) / 2,
+                                torch.where((more_confident_e == 1).unsqueeze(1), clip_logits, src_logits))
+        routeae_acc = (routed_ae.argmax(1) == labels).float().mean().item() * 100
+
+        logger.info(f"Routing: margin={routem_acc:.1f}% entropy={routee_acc:.1f}% "
+                    f"agree+margin={routea_acc:.1f}% agree+ent={routeae_acc:.1f}% "
+                    f"vs ens={ens_acc:.1f}% oracle={oracle_acc:.1f}%")
+
         logger.info(f"\n=== Summary: src={src_acc:.1f}% clip={clip_acc:.1f}% ens={ens_acc:.1f}% "
                     f"oracle={oracle_acc:.1f}% | both_wrong={bw} diff_error={bw_diff.sum().item() if bw>0 else 0} ===\n")
 
