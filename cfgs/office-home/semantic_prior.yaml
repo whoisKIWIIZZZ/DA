@@ -1,0 +1,21 @@
+MODEL:
+  ARCH: resnet50
+  METHOD: semantic_prior
+SETTING:
+  DATASET: office-home
+  S: 0
+  T: 1
+  SEED: 2020
+  OUTPUT_SRC: source
+OPTIM:
+  METHOD: SGD
+  MOMENTUM: 0.9
+  LR: 5e-3
+  WD: 1e-3
+  NESTEROV: TRUE
+TEST:
+  BATCH_SIZE: 64
+  MAX_EPOCH: 30
+  INTERVAL: 30
+ProDe:
+  ARCH: ViT-B/32

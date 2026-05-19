@@ -159,3 +159,135 @@ def evaluate_zeroshot_neg(cfg):
         'neg_fix_rate': neg_fix_rate,
         'comb_fix_rate': comb_fix_rate,
     }
+
+
+def evaluate_semantic_prior(cfg):
+    """Test text-guided semantic prior: neg_prior = softmax(pos) @ class_sim."""
+    logger.info("=== Semantic Prior Evaluation ===")
+
+    arch = getattr(getattr(cfg, 'ProDe', None), 'ARCH', None) or 'ViT-B/32'
+    logger.info(f"Loading CLIP: {arch}")
+    clip_model = clip.load(arch)[0]
+    clip_model.float().cuda()
+    clip_model.eval()
+
+    # Load class names
+    classnames = []
+    with open(cfg.name_file) as f:
+        for line in f:
+            classnames.extend([i for i in line.split()])
+    classnames = [name.replace("_", " ") for name in classnames]
+    C = len(classnames)
+    logger.info(f"Dataset: {cfg.SETTING.DATASET}, classes: {C}")
+
+    # Positive text prompts
+    pos_prompts = [f"a photo of a {name}." for name in classnames]
+    pos_tokens = torch.cat([clip.tokenize(p) for p in pos_prompts]).cuda()
+
+    with torch.no_grad():
+        text_feats = clip_model.encode_text(pos_tokens)
+        text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+
+        # Semantic similarity matrix
+        class_sim = text_feats @ text_feats.T
+        class_sim.fill_diagonal_(0)
+        class_sim = class_sim / (class_sim.sum(dim=1, keepdim=True) + 1e-6)
+
+        logit_scale = clip_model.logit_scale.exp()
+
+    logger.info("class_sim stats: diag_removed, row_normed, "
+                f"max={class_sim.max().item():.3f}, mean={class_sim.mean().item():.4f}")
+
+    # Data
+    dset_loaders = data_load(cfg)
+    loader = dset_loaders["test"]
+
+    all_pos_logits = []
+    all_neg_prior = []
+    all_labels = []
+
+    with torch.no_grad():
+        for data in loader:
+            inputs = data[0]
+            labels = data[1]
+            inputs = inputs.cuda()
+
+            img_feats = clip_model.encode_image(inputs)
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+
+            pos_logits = logit_scale * img_feats @ text_feats.t()
+
+            # Second-order semantic propagation
+            p = torch.softmax(pos_logits, dim=1)
+            neg_prior = p @ class_sim
+
+            all_pos_logits.append(pos_logits.cpu())
+            all_neg_prior.append(neg_prior.cpu())
+            all_labels.append(labels)
+
+    pos_logits = torch.cat(all_pos_logits, dim=0)
+    neg_prior = torch.cat(all_neg_prior, dim=0)
+    labels = torch.cat(all_labels, dim=0)
+    p = torch.softmax(pos_logits, dim=1)
+
+    # Baseline
+    _, pos_pred = torch.max(pos_logits, dim=1)
+    pos_acc = (pos_pred == labels).float().mean().item() * 100
+
+    # Sweep alpha: corrected = softmax - alpha * neg_prior
+    # Also sweep in logit space: corrected_logits = pos_logits - alpha * logit_scale * neg_prior
+    logger.info("=" * 60)
+    logger.info(f"Baseline CLIP zero-shot: {pos_acc:.2f}%")
+    logger.info("")
+
+    # Prob-space correction: argmax(p - alpha * neg_prior)
+    best_prob, best_alpha_prob = pos_acc, 0.0
+    for alpha in [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]:
+        corrected = p - alpha * neg_prior
+        _, pred = torch.max(corrected, dim=1)
+        acc = (pred == labels).float().mean().item() * 100
+        delta = acc - pos_acc
+        logger.info(f"  prob-space  alpha={alpha:5.1f}: {acc:.2f}% (delta={delta:+.2f}%)")
+        if acc > best_prob:
+            best_prob = acc
+            best_alpha_prob = alpha
+
+    logger.info(f"  -> best prob-space: alpha={best_alpha_prob}, acc={best_prob:.2f}%")
+
+    # Logit-space correction: argmax(pos_logits - alpha * logit_scale * neg_prior)
+    logger.info("")
+    best_logit, best_alpha_logit = pos_acc, 0.0
+    for alpha in [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]:
+        corrected = pos_logits - alpha * logit_scale * neg_prior
+        _, pred = torch.max(corrected, dim=1)
+        acc = (pred == labels).float().mean().item() * 100
+        delta = acc - pos_acc
+        logger.info(f"  logit-space alpha={alpha:5.1f}: {acc:.2f}% (delta={delta:+.2f}%)")
+        if acc > best_logit:
+            best_logit = acc
+            best_alpha_logit = alpha
+
+    logger.info(f"  -> best logit-space: alpha={best_alpha_logit}, acc={best_logit:.2f}%")
+
+    # Where does CLIP fail and does residual help?
+    pos_correct = (pos_pred == labels)
+    pos_wrong = ~pos_correct
+    if pos_wrong.sum() > 0:
+        corrected = p - best_alpha_prob * neg_prior
+        _, best_pred = torch.max(corrected, dim=1)
+        fixes = (pos_wrong & (best_pred == labels)).float().sum().item()
+        fix_rate = fixes / pos_wrong.float().sum().item() * 100
+        logger.info(f"\nBest prob model fixes {fix_rate:.1f}% of CLIP's {pos_wrong.sum().item()} mistakes")
+
+        # Per-class: which classes benefit most?
+        matrix = confusion_matrix(labels, pos_pred)
+        per_cls_acc = matrix.diagonal() / matrix.sum(axis=1) * 100
+        matrix_corr = confusion_matrix(labels, best_pred)
+        per_cls_acc_corr = matrix_corr.diagonal() / matrix_corr.sum(axis=1) * 100
+        logger.info("\nPer-class delta (corrected - baseline):")
+        for i, name in enumerate(classnames):
+            d = per_cls_acc_corr[i] - per_cls_acc[i]
+            if abs(d) > 1.0:
+                logger.info(f"  {i:3d} {name:20s}: {per_cls_acc[i]:5.1f}% -> {per_cls_acc_corr[i]:5.1f}% ({d:+.1f}%)")
+
+    logger.info("=" * 60)

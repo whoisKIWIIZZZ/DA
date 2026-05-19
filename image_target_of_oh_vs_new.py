@@ -216,6 +216,10 @@ if __name__ == "__main__":
         print("testing zero-shot negative prompts")
         ZSNEG.evaluate_zeroshot_neg(cfg)
 
+    elif cfg.MODEL.METHOD == "semantic_prior":
+        print("testing semantic prior (class_sim propagation)")
+        ZSNEG.evaluate_semantic_prior(cfg)
+
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))
     print(all_time)
