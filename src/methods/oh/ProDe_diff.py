@@ -262,23 +262,23 @@ def train_target(cfg):
         clip_score = clip_score.float()
 
         with torch.no_grad():
-            # Text-guided negative prior: residual = softmax - semantic propagation
-            clip_score_sm_raw = torch.softmax(clip_score, dim=1)
-            neg_prior = clip_score_sm_raw @ class_sim
-            residual = clip_score_sm_raw - neg_prior
+            # Text-guided negative prior: log-space residual
+            logp = torch.log_softmax(clip_score, dim=1)
+            neg_prior = torch.softmax(clip_score, dim=1) @ class_sim
+            residual = logp - torch.log(neg_prior + 1e-6)
             new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * residual
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
 
-        # N+N IID loss: netC_proxy vs CLIP+semantic propagation
+        # N+N IID loss with temperature-controlled proxy
         outputs_proxy2N = netC_proxy(features_test)
         softmax_out_2N = nn.Softmax(dim=1)(outputs_proxy2N)
         with torch.no_grad():
-            clip_logits_2N = torch.cat([clip_score, clip_score @ class_sim], dim=1)
+            T_proxy = cfg.ProDe.PROXY_WEIGHT + 1.0  # ~2.0, larger = less proxy influence
+            clip_logits_2N = torch.cat([clip_score, clip_score @ class_sim / T_proxy], dim=1)
             clip_softmax_2N = nn.Softmax(dim=1)(clip_logits_2N)
-        # iic_loss, _ = IID_losses.IID_loss(cfg.class_num, softmax_out_2N, clip_softmax_2N,
-        #                                   w_base=1.0, w_aux=0.5, bn=-0.3, lamb=1.0)
-            iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
+        iic_loss, _ = IID_losses.IID_loss(cfg.class_num, softmax_out_2N, clip_softmax_2N,
+                                          w_base=1.0, w_aux=0.3, bn=-0.3, lamb=1.0)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
 
