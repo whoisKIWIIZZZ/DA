@@ -268,7 +268,24 @@ def train_target(cfg):
             res = neg_prior - p
 
             residual = torch.log((p - 0.1 * res).clamp(min=1e-6)) - torch.log(p.clamp(min=1e-6))
-            new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * residual
+
+            term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
+            term_b = clip_score.cuda()
+            term_c = cfg.ProDe.PROXY_WEIGHT * residual
+            new_clip = term_a + term_b + term_c
+
+            if iter_num % 50 == 1:
+                logger.info(
+                    'term_a(base-bank): mean={:.2f} std={:.2f} | '
+                    'term_b(clip_score): mean={:.2f} std={:.2f} | '
+                    'term_c(w*residual): mean={:.3f} std={:.3f} | '
+                    'p max/mean={:.3f}/{:.3f} | '
+                    'neg_prior max/mean={:.3f}/{:.3f}'.format(
+                        term_a.mean().item(), term_a.std().item(),
+                        term_b.mean().item(), term_b.std().item(),
+                        term_c.mean().item(), term_c.std().item(),
+                        p.max().item(), p.mean().item(),
+                        neg_prior.max().item(), neg_prior.mean().item()))
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
 
