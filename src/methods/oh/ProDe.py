@@ -144,7 +144,7 @@ def test_time_tuning(model, inputs, optimizer, cfg, target_output):
 
 def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_output):
     optimizer.load_state_dict(optim_state)
-    output = test_time_tuning(model, input, optimizer, cfg, target_output)
+    #output = test_time_tuning(model, input, optimizer, cfg, target_output)
     with torch.no_grad():
         with torch.amp.autocast('cuda'):
             model.eval()
