@@ -669,7 +669,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             clip_image_feat = clip_model.encode_image(inputs_clip)
             clip_image_feat = clip_image_feat / clip_image_feat.norm(dim=-1, keepdim=True)
         # Proxy forward (with grad, for fine-tuning loss below)
-        neg_logits = neg_proxy(clip_image_feat)  # (B, N): >0 = "not class", <0 = "is class"
+        neg_logits, _ = neg_proxy(clip_image_feat)  # (B, N): >0 = "not class", <0 = "is class"
         # Modulate CLIP in logit space: subtract neg_logits
         #   neg_logits < 0 → adds to CLIP logit → boosts that class
         #   neg_logits > 0 → subtracts from CLIP logit → suppresses that class
@@ -754,7 +754,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                     clip_labels = clip_data[1].cuda()
                     feats = clip_model.encode_image(clip_inputs)
                     feats = feats / feats.norm(dim=-1, keepdim=True)
-                    proxy_pred = torch.argmax(-neg_proxy(feats), dim=1)
+                    proxy_pred = torch.argmax(-neg_proxy(feats)[0], dim=1)
                     proxy_correct += (proxy_pred == clip_labels).sum().item()
                     proxy_total += clip_labels.size(0)
             proxy_acc = proxy_correct / proxy_total * 100
