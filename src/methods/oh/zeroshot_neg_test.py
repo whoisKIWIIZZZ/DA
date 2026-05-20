@@ -181,12 +181,29 @@ def evaluate_zeroshot_neg(cfg):
 
 
 
+def sweep_alpha_neg(pos_logits, neg_logits, labels, alphas=None):
+    """对 neg_logits 做 alpha sweep: combined = pos_logits - alpha * neg_logits"""
+    if alphas is None:
+        alphas = [0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    baseline = (pos_logits.argmax(1) == labels).float().mean().item() * 100
+    best_alpha = 0.0
+    best_acc = baseline
+    for alpha in alphas:
+        combined = pos_logits - alpha * neg_logits
+        acc = (combined.argmax(1) == labels).float().mean().item() * 100
+        if acc > best_acc:
+            best_acc = acc
+            best_alpha = alpha
+    return best_alpha, best_acc
+
+
 def evaluate_learnable_neg(cfg):
     """
     PositiveCoOp 风格：负向嵌入跳过文本编码器，直接在 CLIP 特征空间学习自由向量。
     在 source 训练，在 target 测试，检验跨域迁移性（domain invariance）。
     """
-    logger.info("=== Learnable Negative Embedding (S→T domain invariance test) ===")
+    do_train = getattr(getattr(cfg, 'LEARNABLE_NEG', None), 'TRAIN', True)
+    logger.info(f"=== Learnable Negative Embedding (train={do_train}) ===")
 
     arch = getattr(getattr(cfg, 'ProDe', None), 'ARCH', None) or 'ViT-B/32'
     logger.info(f"Loading CLIP: {arch}")
@@ -226,59 +243,67 @@ def evaluate_learnable_neg(cfg):
             feats = clip_model.encode_text(tokens)
             neg_text_feats[key] = feats / feats.norm(dim=-1, keepdim=True)
 
-    # ===== 加载 Source 数据 =====
-    txt_src = open(cfg.s_dset_path).readlines()
-    dsets_src = ImageList_idx(txt_src, transform=image_test_clip())
-    src_loader = DataLoader(dsets_src, batch_size=cfg.TEST.BATCH_SIZE * 3,
-                            shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     s_name = cfg.domain[cfg.SETTING.S]
-    logger.info(f"S={s_name}: {len(src_loader.dataset)} samples")
-
-    # ===== 在 Source 上训练 neg_embed =====
-    optimizer = torch.optim.Adam([neg_embed], lr=1e-3, weight_decay=1e-4)
-    num_epochs = 20
-    logger.info(f"Training on S for {num_epochs} epochs...")
-
-    for epoch in range(num_epochs):
-        total_loss = 0
-        correct = 0
-        total = 0
-        for data in src_loader:
-            inputs, labels = data[0].cuda(), data[1].cuda()
-            with torch.no_grad():
-                img_feats = clip_model.encode_image(inputs)
-                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-
-            neg_logits = logit_scale * img_feats @ neg_embed.t()
-            loss = nn.CrossEntropyLoss()(-neg_logits, labels)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            _, pred = torch.min(neg_logits, dim=1)
-            correct += (pred == labels).float().sum().item()
-            total += labels.size(0)
-
-        if (epoch + 1) % 5 == 0:
-            logger.info(f"  Epoch {epoch+1:3d}: loss={total_loss/len(src_loader):.4f}, "
-                        f"src_neg_acc={correct/total*100:.2f}%")
-
-    # ===== 保存模型 =====
     save_path = osp.join(cfg.output_dir_src, f"learned_neg_{s_name}.pt")
-    os.makedirs(cfg.output_dir_src, exist_ok=True)
-    torch.save({
-        'neg_embed': neg_embed.detach().cpu(),
-        'pos_text': pos_text.cpu(),
-        'classnames': classnames,
-        'dataset': cfg.SETTING.DATASET,
-        'arch': arch,
-        'C': C,
-        'D': D,
-        'logit_scale': logit_scale,
-    }, save_path)
-    logger.info(f"Saved: {save_path}")
+
+    if do_train:
+        # ===== 加载 Source 数据 =====
+        txt_src = open(cfg.s_dset_path).readlines()
+        dsets_src = ImageList_idx(txt_src, transform=image_test_clip())
+        src_loader = DataLoader(dsets_src, batch_size=cfg.TEST.BATCH_SIZE * 3,
+                                shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
+        logger.info(f"S={s_name}: {len(src_loader.dataset)} samples")
+
+        # ===== 训练 neg_embed =====
+        optimizer = torch.optim.Adam([neg_embed], lr=1e-3, weight_decay=1e-4)
+        num_epochs = 20
+        logger.info(f"Training on S for {num_epochs} epochs...")
+
+        for epoch in range(num_epochs):
+            total_loss = 0
+            correct = 0
+            total = 0
+            for data in src_loader:
+                inputs, labels = data[0].cuda(), data[1].cuda()
+                with torch.no_grad():
+                    img_feats = clip_model.encode_image(inputs)
+                    img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+
+                neg_logits = logit_scale * img_feats @ neg_embed.t()
+                loss = nn.CrossEntropyLoss()(-neg_logits, labels)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+                _, pred = torch.min(neg_logits, dim=1)
+                correct += (pred == labels).float().sum().item()
+                total += labels.size(0)
+
+            if (epoch + 1) % 5 == 0:
+                logger.info(f"  Epoch {epoch+1:3d}: loss={total_loss/len(src_loader):.4f}, "
+                            f"src_neg_acc={correct/total*100:.2f}%")
+
+        # 保存模型
+        os.makedirs(cfg.output_dir_src, exist_ok=True)
+        torch.save({
+            'neg_embed': neg_embed.detach().cpu(),
+            'pos_text': pos_text.cpu(),
+            'classnames': classnames,
+            'dataset': cfg.SETTING.DATASET,
+            'arch': arch,
+            'C': C,
+            'D': D,
+            'logit_scale': logit_scale,
+        }, save_path)
+        logger.info(f"Saved: {save_path}")
+    else:
+        # 加载已有模型
+        logger.info(f"Loading pre-trained neg_embed from {save_path}")
+        ckpt = torch.load(save_path, map_location='cpu')
+        neg_embed.data.copy_(ckpt['neg_embed'].to(neg_embed.device, neg_embed.dtype))
+        logger.info(f"Loaded: S={ckpt.get('dataset', '?')}, C={ckpt['C']}, D={ckpt['D']}")
 
     # ===== 遍历所有 T 域评估 =====
     pos_text_cpu = pos_text.cpu()
@@ -358,6 +383,13 @@ def evaluate_learnable_neg(cfg):
         combined = pos_logits - neg_logits
         comb_acc, _, _, comb_fix = compute_metrics(combined, is_neg=False)
 
+        # alpha sweep
+        alpha_learned, comb_best = sweep_alpha_neg(pos_logits, neg_logits, labels)
+
+        # 文本编码 neg 的 alpha sweep（取 other_than）
+        txt_nlogits = logit_scale * img_feats @ neg_text_cpu['other_than'].t()
+        alpha_txt, comb_best_txt = sweep_alpha_neg(pos_logits, txt_nlogits, labels)
+
         all_results[t_name] = {
             'N': img_feats.shape[0], 'pos_acc': pos_acc,
             'text': text_metrics,
@@ -365,29 +397,30 @@ def evaluate_learnable_neg(cfg):
                 'neg_acc': neg_acc, 'comb_acc': comb_acc,
                 'rank1': rank1, 'mean_rank': mean_rank,
                 'neg_fix': neg_fix, 'comb_fix': comb_fix,
+                'alpha': alpha_learned, 'comb_best': comb_best,
             },
+            'txt_alpha': alpha_txt, 'txt_comb_best': comb_best_txt,
         }
 
     # ===== 输出总表 =====
     logger.info("")
-    logger.info("=" * 100)
-    logger.info(f"S = {s_name}  |  C = {C}  |  arch = {arch}")
+    logger.info("=" * 110)
+    logger.info(f"S = {s_name}  |  C = {C}  |  arch = {arch}  |  train={do_train}")
     logger.info("")
 
-    # 表头
-    hdr = (f"{'T':>12s} | {'PosAcc':>7s} | "
-           f"{'NegAcc':>7s} {'CombAcc':>7s} {'Rank1':>7s} {'NFix%':>7s} {'CFix%':>7s} | "
-           f"{'txt-Neg':>7s} {'txt-Cmb':>7s}")
-    sep = "-" * len(hdr.expandtabs())
-    logger.info(hdr)
-    logger.info(sep)
+    # 表1: 核心指标
+    hdr1 = (f"{'T':>12s} | {'PosAcc':>7s} | "
+            f"{'NegAcc':>7s} {'CombAcc':>7s} {'Rank1':>7s} {'NFix%':>7s} {'CFix%':>7s} | "
+            f"{'txt-Neg':>7s} {'txt-Cmb':>7s}")
+    sep1 = "-" * len(hdr1.expandtabs())
+    logger.info("--- Core Metrics ---")
+    logger.info(hdr1)
+    logger.info(sep1)
 
     for t_name, r in all_results.items():
         is_src = "(S)" if t_name == s_name else ""
         L = r['learned']
-        # 取最好的文本模板（other_than 通常最优）
         txt = r['text']['other_than']
-
         logger.info(
             f"{t_name+' '+is_src:>12s} | {r['pos_acc']:6.2f}% | "
             f"{L['neg_acc']:6.2f}% {L['comb_acc']:6.2f}% "
@@ -395,28 +428,52 @@ def evaluate_learnable_neg(cfg):
             f"{txt['neg_acc']:6.2f}% {txt['comb_acc']:6.2f}%"
         )
 
-    # 统计跨域均值（不含 S 自身）
     cross_t = [r for t_name, r in all_results.items() if t_name != s_name]
     if cross_t:
-        avg_pos = np.mean([r['pos_acc'] for r in cross_t])
-        avg_neg = np.mean([r['learned']['neg_acc'] for r in cross_t])
-        avg_comb = np.mean([r['learned']['comb_acc'] for r in cross_t])
-        avg_rank1 = np.mean([r['learned']['rank1'] for r in cross_t])
-        avg_nfix = np.mean([r['learned']['neg_fix'] for r in cross_t])
-        avg_cfix = np.mean([r['learned']['comb_fix'] for r in cross_t])
-        avg_txt_neg = np.mean([r['text']['other_than']['neg_acc'] for r in cross_t])
-        avg_txt_cmb = np.mean([r['text']['other_than']['comb_acc'] for r in cross_t])
-
-        logger.info(sep)
+        avg = lambda key: np.mean([r['learned'][key] for r in cross_t])
+        avg_txt = lambda key: np.mean([r['text']['other_than'][key] for r in cross_t])
+        logger.info(sep1)
         logger.info(
-            f"{'AVG (cross)':>12s} | {avg_pos:6.2f}% | "
-            f"{avg_neg:6.2f}% {avg_comb:6.2f}% "
-            f"{avg_rank1:6.2f}% {avg_nfix:6.1f}% {avg_cfix:6.1f}% | "
-            f"{avg_txt_neg:6.2f}% {avg_txt_cmb:6.2f}%"
+            f"{'AVG (cross)':>12s} | {np.mean([r['pos_acc'] for r in cross_t]):6.2f}% | "
+            f"{avg('neg_acc'):6.2f}% {avg('comb_acc'):6.2f}% "
+            f"{avg('rank1'):6.2f}% {avg('neg_fix'):6.1f}% {avg('comb_fix'):6.1f}% | "
+            f"{avg_txt('neg_acc'):6.2f}% {avg_txt('comb_acc'):6.2f}%"
         )
 
-    logger.info("=" * 100)
-    logger.info(f"Model saved: {save_path}")
+    # 表2: alpha sweep
+    logger.info("")
+    logger.info("--- Alpha Sweep: combined = pos - alpha * neg ---")
+    hdr2 = (f"{'T':>12s} | {'PosAcc':>7s} | "
+            f"{'learned α':>10s} {'Comb*':>7s} | "
+            f"{'txt α':>10s} {'txt Comb*':>7s}")
+    sep2 = "-" * len(hdr2.expandtabs())
+    logger.info(hdr2)
+    logger.info(sep2)
+
+    for t_name, r in all_results.items():
+        is_src = "(S)" if t_name == s_name else ""
+        L = r['learned']
+        logger.info(
+            f"{t_name+' '+is_src:>12s} | {r['pos_acc']:6.2f}% | "
+            f"{L['alpha']:9.2f}  {L['comb_best']:6.2f}% | "
+            f"{r['txt_alpha']:9.2f}  {r['txt_comb_best']:6.2f}%"
+        )
+
+    if cross_t:
+        avg_alpha = np.mean([r['learned']['alpha'] for r in cross_t])
+        avg_comb_best = np.mean([r['learned']['comb_best'] for r in cross_t])
+        avg_txt_alpha = np.mean([r['txt_alpha'] for r in cross_t])
+        avg_txt_best = np.mean([r['txt_comb_best'] for r in cross_t])
+        pos_mean = np.mean([r['pos_acc'] for r in cross_t])
+        logger.info(sep2)
+        logger.info(
+            f"{'AVG (cross)':>12s} | {pos_mean:6.2f}% | "
+            f"{avg_alpha:9.2f}  {avg_comb_best:6.2f}% | "
+            f"{avg_txt_alpha:9.2f}  {avg_txt_best:6.2f}%"
+        )
+
+    logger.info("=" * 110)
+    logger.info(f"Model: {save_path}")
 
     return {'s_name': s_name, 'all_results': all_results, 'save_path': save_path}
 

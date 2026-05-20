@@ -19,3 +19,5 @@ TEST:
   INTERVAL: 30
 ProDe:
   ARCH: ViT-B/32
+LEARNABLE_NEG:
+  TRAIN: False
