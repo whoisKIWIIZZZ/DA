@@ -179,6 +179,184 @@ def evaluate_zeroshot_neg(cfg):
     return {'pos_acc': pos_acc, 'best_template': best_key, 'results': results}
 
 
+def data_load_src(cfg):
+    """加载 source + target 数据"""
+    dset_loaders = data_load(cfg)
+    txt_src = open(cfg.s_dset_path).readlines()
+    dsets_src = ImageList_idx(txt_src, transform=image_test_clip())
+    dset_loaders["source"] = DataLoader(dsets_src, batch_size=cfg.TEST.BATCH_SIZE * 3,
+                                         shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    return dset_loaders
+
+
+def evaluate_learnable_neg(cfg):
+    """
+    PositiveCoOp 风格：负向嵌入跳过文本编码器，直接在 CLIP 特征空间学习自由向量。
+    在 source 训练，在 target 测试，检验跨域迁移性（domain invariance）。
+    """
+    logger.info("=== Learnable Negative Embedding (S→T domain invariance test) ===")
+
+    arch = getattr(getattr(cfg, 'ProDe', None), 'ARCH', None) or 'ViT-B/32'
+    logger.info(f"Loading CLIP: {arch}")
+    clip_model, _ = clip.load(arch)
+    clip_model.float().cuda()
+    clip_model.eval()
+
+    # 类别名
+    classnames = []
+    with open(cfg.name_file) as f:
+        for line in f:
+            classnames.extend([i for i in line.split()])
+    classnames = [name.replace("_", " ") for name in classnames]
+    C = len(classnames)
+    D = clip_model.visual.output_dim
+    logger.info(f"Dataset: {cfg.SETTING.DATASET}, S={cfg.domain[cfg.SETTING.S]}, "
+                f"T={cfg.domain[cfg.SETTING.T]}, classes={C}, dim={D}")
+
+    # 正prompt文本特征（固定，不训练）
+    pos_prompts = [f"a photo of a {name}." for name in classnames]
+    pos_tokens = torch.cat([clip.tokenize(p) for p in pos_prompts]).cuda()
+    with torch.no_grad():
+        pos_text = clip_model.encode_text(pos_tokens)
+        pos_text = pos_text / pos_text.norm(dim=-1, keepdim=True)
+        logit_scale = clip_model.logit_scale.exp().item()
+
+    # 负向可学习嵌入（C, D）—— 不走文本编码器
+    neg_embed = nn.Parameter(torch.randn(C, D, device=pos_text.device, dtype=pos_text.dtype) * 0.02)
+
+    # 文本编码的负prompt（用于对比）
+    neg_text_feats = {}
+    for key in ["not", "without", "other_than"]:
+        template = NEG_TEMPLATES[key]
+        prompts = [template.format(name=name) for name in classnames]
+        tokens = torch.cat([clip.tokenize(p) for p in prompts]).cuda()
+        with torch.no_grad():
+            feats = clip_model.encode_text(tokens)
+            neg_text_feats[key] = feats / feats.norm(dim=-1, keepdim=True)
+
+    # 数据
+    dset_loaders = data_load_src(cfg)
+    src_loader = dset_loaders["source"]
+    tgt_loader = dset_loaders["test"]
+    logger.info(f"S={cfg.domain[cfg.SETTING.S]}: {len(src_loader.dataset)}, "
+                f"T={cfg.domain[cfg.SETTING.T]}: {len(tgt_loader.dataset)}")
+
+    # ===== 在 Source 上训练 neg_embed =====
+    optimizer = torch.optim.Adam([neg_embed], lr=1e-3, weight_decay=1e-4)
+    num_epochs = 20
+    logger.info(f"Training on S for {num_epochs} epochs...")
+
+    for epoch in range(num_epochs):
+        total_loss = 0
+        correct = 0
+        total = 0
+        for data in src_loader:
+            inputs, labels = data[0].cuda(), data[1].cuda()
+            with torch.no_grad():
+                img_feats = clip_model.encode_image(inputs)
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+
+            neg_logits = logit_scale * img_feats @ neg_embed.t()
+            loss = nn.CrossEntropyLoss()(-neg_logits, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            _, pred = torch.min(neg_logits, dim=1)
+            correct += (pred == labels).float().sum().item()
+            total += labels.size(0)
+
+        if (epoch + 1) % 5 == 0:
+            logger.info(f"  Epoch {epoch+1:3d}: loss={total_loss/len(src_loader):.4f}, "
+                        f"src_neg_acc={correct/total*100:.2f}%")
+
+    # ===== 提取 Target 图像特征 =====
+    logger.info(f"\nEvaluating on T ({cfg.domain[cfg.SETTING.T]})...")
+    all_img_feats = []
+    all_labels = []
+    with torch.no_grad():
+        for data in tgt_loader:
+            inputs, labels = data[0].cuda(), data[1]
+            img_feats = clip_model.encode_image(inputs)
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            all_img_feats.append(img_feats.cpu())
+            all_labels.append(labels)
+
+    img_feats = torch.cat(all_img_feats, dim=0)   # CPU
+    labels = torch.cat(all_labels, dim=0)
+    N = img_feats.shape[0]
+
+    # Baseline
+    pos_logits = logit_scale * img_feats @ pos_text.cpu().t()
+    _, pos_pred = torch.max(pos_logits, dim=1)
+    pos_acc = (pos_pred == labels).float().mean().item() * 100
+    pos_wrong = ~(pos_pred == labels)
+
+    # 文本编码 neg（原方案）
+    text_results = {}
+    for key, neg_feats in neg_text_feats.items():
+        neg_feats_cpu = neg_feats.cpu()
+        nlogits = logit_scale * img_feats @ neg_feats_cpu.t()
+        _, npred = torch.min(nlogits, dim=1)
+        nacc = (npred == labels).float().mean().item() * 100
+        combined = pos_logits - nlogits
+        _, cpred = torch.max(combined, dim=1)
+        cacc = (cpred == labels).float().mean().item() * 100
+        text_results[key] = {'neg_acc': nacc, 'comb_acc': cacc}
+
+    # 可学习 neg（S→T）
+    neg_embed_cpu = neg_embed.detach().cpu()
+    neg_logits = logit_scale * img_feats @ neg_embed_cpu.t()
+    _, neg_pred = torch.min(neg_logits, dim=1)
+    neg_acc = (neg_pred == labels).float().mean().item() * 100
+
+    combined = pos_logits - neg_logits
+    _, comb_pred = torch.max(combined, dim=1)
+    comb_acc = (comb_pred == labels).float().mean().item() * 100
+
+    # Rank 分析
+    neg_ranks = neg_logits.argsort(dim=1).argsort(dim=1)
+    true_neg_ranks = neg_ranks.gather(1, labels.unsqueeze(1)).float()
+    rank1 = (true_neg_ranks == 0).float().mean().item() * 100
+    mean_rank = true_neg_ranks.mean().item()
+
+    # Fix rate
+    if pos_wrong.sum() > 0:
+        neg_fixes = (pos_wrong & (neg_pred == labels)).float().sum().item()
+        neg_fix_rate = neg_fixes / pos_wrong.float().sum().item() * 100
+        comb_fixes = (pos_wrong & (comb_pred == labels)).float().sum().item()
+        comb_fix_rate = comb_fixes / pos_wrong.float().sum().item() * 100
+    else:
+        neg_fix_rate = comb_fix_rate = 0.0
+
+    # ===== 输出对比 =====
+    logger.info("=" * 90)
+    logger.info(f"Baseline CLIP zero-shot (positive): {pos_acc:.2f}%  (N={N}, C={C})")
+    logger.info(f"S={cfg.domain[cfg.SETTING.S]} → T={cfg.domain[cfg.SETTING.T]}")
+    logger.info("")
+    header = (f"{'Method':<35s} {'NegAcc':>8s} {'CombAcc':>8s} "
+              f"{'Rank1':>8s} {'NFix%':>8s} {'CFix%':>8s}")
+    logger.info(header)
+    logger.info("-" * 90)
+    for key in ["not", "without", "other_than"]:
+        r = text_results[key]
+        logger.info(f"  text-encoded ({key:12s})     {r['neg_acc']:7.2f}% {r['comb_acc']:7.2f}%")
+    logger.info(f"  learned free embed (S→T)    {neg_acc:7.2f}% {comb_acc:7.2f}% "
+                f"{rank1:7.2f}% {neg_fix_rate:7.1f}% {comb_fix_rate:7.1f}%")
+    logger.info(f"  (mean rank of true class: {mean_rank:.2f})")
+    logger.info("=" * 90)
+
+    return {
+        'pos_acc': pos_acc,
+        'text_results': text_results,
+        'learned_neg_acc': neg_acc, 'learned_comb_acc': comb_acc,
+        'neg_rank1': rank1, 'mean_neg_rank': mean_rank,
+        'neg_fix_rate': neg_fix_rate, 'comb_fix_rate': comb_fix_rate,
+    }
+
+
 def evaluate_semantic_prior(cfg):
     """Test text-guided semantic prior: neg_prior = softmax(pos) @ class_sim."""
     logger.info("=== Semantic Prior Evaluation ===")

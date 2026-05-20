@@ -111,6 +111,10 @@ if __name__ == "__main__":
         print("testing zero-shot negative prompts")
         ZSNEG.evaluate_zeroshot_neg(cfg)
 
+    elif cfg.MODEL.METHOD == "learnable_neg":
+        print("training learnable neg embed on S, testing on T")
+        ZSNEG.evaluate_learnable_neg(cfg)
+
     end = time.time()
     all_time = 'Running time: %s Seconds'%(round(end-start, 2))
     print(all_time)
