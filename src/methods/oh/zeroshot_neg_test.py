@@ -32,9 +32,21 @@ def data_load(cfg):
     return dset_loaders
 
 
+# 多种表达"not [CLS]"语义的自然语言prompt模板
+NEG_TEMPLATES = {
+    "not":              "a photo of not {name}.",           # 直接"not"修饰
+    "without":          "a photo without a {name}.",        # 介词"without"
+    "no":               "a photo with no {name}.",          # 限定词"no"
+    "is_not":           "a photo that is not a {name}.",    # 定语从句否定
+    "other_than":       "a photo of something other than a {name}.",  # "other than"
+    "anything_but":     "a photo of anything but a {name}.",          # "anything but"
+    "sent_neg":         "this is not a photo of a {name}.", # 句子级否定
+}
+
+
 def evaluate_zeroshot_neg(cfg):
-    """Test zero-shot CLIP with 'a photo of not {cls}' as negative prompts."""
-    logger.info("=== Zero-shot Negative Prompt Test ===")
+    """测试多种自然语言否定prompt的zero-shot CLIP表现."""
+    logger.info("=== Zero-shot Negative Prompt Test (多模板) ===")
 
     # Load CLIP
     arch = getattr(getattr(cfg, 'ProDe', None), 'ARCH', None) or 'ViT-B/32'
@@ -52,28 +64,30 @@ def evaluate_zeroshot_neg(cfg):
     C = len(classnames)
     logger.info(f"Dataset: {cfg.SETTING.DATASET}, classes: {C}")
 
-    # Build positive and negative text prompts
+    # 正prompt和所有负prompt模板的文本特征
     pos_prompts = [f"a photo of a {name}." for name in classnames]
-    neg_prompts = [f"a photo of not {name}." for name in classnames]
-
     pos_tokens = torch.cat([clip.tokenize(p) for p in pos_prompts]).cuda()
-    neg_tokens = torch.cat([clip.tokenize(p) for p in neg_prompts]).cuda()
 
-    # Encode all text features once
     with torch.no_grad():
         pos_text_feats = clip_model.encode_text(pos_tokens)
         pos_text_feats = pos_text_feats / pos_text_feats.norm(dim=-1, keepdim=True)
-        neg_text_feats = clip_model.encode_text(neg_tokens)
-        neg_text_feats = neg_text_feats / neg_text_feats.norm(dim=-1, keepdim=True)
+
+        # 编码所有负模板
+        neg_text_feats = {}
+        for key, template in NEG_TEMPLATES.items():
+            prompts = [template.format(name=name) for name in classnames]
+            tokens = torch.cat([clip.tokenize(p) for p in prompts]).cuda()
+            feats = clip_model.encode_text(tokens)
+            neg_text_feats[key] = feats / feats.norm(dim=-1, keepdim=True)
 
         logit_scale = clip_model.logit_scale.exp().item()
 
-    # Data
+    # 提取所有图像特征（只做一次）
+    logger.info("Extracting image features...")
     dset_loaders = data_load(cfg)
     loader = dset_loaders["test"]
 
-    all_pos_logits = []
-    all_neg_logits = []
+    all_img_feats = []
     all_labels = []
 
     with torch.no_grad():
@@ -84,81 +98,85 @@ def evaluate_zeroshot_neg(cfg):
 
             img_feats = clip_model.encode_image(inputs)
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-
-            pos_logits = logit_scale * img_feats @ pos_text_feats.t()
-            neg_logits = logit_scale * img_feats @ neg_text_feats.t()
-
-            all_pos_logits.append(pos_logits.cpu())
-            all_neg_logits.append(neg_logits.cpu())
+            all_img_feats.append(img_feats.cpu())
             all_labels.append(labels)
 
-    pos_logits = torch.cat(all_pos_logits, dim=0)  # (N, C)
-    neg_logits = torch.cat(all_neg_logits, dim=0)  # (N, C)
-    labels = torch.cat(all_labels, dim=0)           # (N,)
+    img_feats = torch.cat(all_img_feats, dim=0)  # (N, D)
+    labels = torch.cat(all_labels, dim=0)          # (N,)
+    N = img_feats.shape[0]
+    logger.info(f"Test samples: {N}")
 
-    # ---- Positive accuracy (standard CLIP zero-shot) ----
+    # 正prompt预测（基线）
+    pos_logits = logit_scale * img_feats @ pos_text_feats.t()
     _, pos_pred = torch.max(pos_logits, dim=1)
     pos_acc = (pos_pred == labels).float().mean().item() * 100
+    pos_wrong = ~(pos_pred == labels)
 
-    # ---- Negative-based prediction: lowest neg_logit = true class ----
-    # "a photo of not {cls}" should be least matching for the TRUE class
-    _, neg_pred = torch.min(neg_logits, dim=1)
-    neg_acc = (neg_pred == labels).float().mean().item() * 100
+    # 逐模板评估
+    results = {}
+    for key, neg_feats in neg_text_feats.items():
+        neg_logits = logit_scale * img_feats @ neg_feats.t()
 
-    # ---- Combined: pos_logits - neg_logits (higher = more positive evidence) ----
-    combined = pos_logits - neg_logits
-    _, comb_pred = torch.max(combined, dim=1)
-    comb_acc = (comb_pred == labels).float().mean().item() * 100
+        # argmin 预测
+        _, neg_pred = torch.min(neg_logits, dim=1)
+        neg_acc = (neg_pred == labels).float().mean().item() * 100
 
-    # ---- Per-class analysis: does neg_logits[true_class] rank lowest? ----
-    neg_ranks = neg_logits.argsort(dim=1).argsort(dim=1)  # 0 = lowest neg_logit
-    true_neg_ranks = neg_ranks.gather(1, labels.unsqueeze(1)).float()
-    mean_neg_rank = true_neg_ranks.mean().item()
-    neg_rank1 = (true_neg_ranks == 0).float().mean().item() * 100  # true class is lowest neg
+        # 组合预测
+        combined = pos_logits - neg_logits
+        _, comb_pred = torch.max(combined, dim=1)
+        comb_acc = (comb_pred == labels).float().mean().item() * 100
 
-    # ---- Where does CLIP fail? ----
-    pos_correct = (pos_pred == labels)
-    pos_wrong = ~pos_correct
+        # rank 分析
+        neg_ranks = neg_logits.argsort(dim=1).argsort(dim=1)
+        true_neg_ranks = neg_ranks.gather(1, labels.unsqueeze(1)).float()
+        mean_neg_rank = true_neg_ranks.mean().item()
+        neg_rank1 = (true_neg_ranks == 0).float().mean().item() * 100
 
-    # Among positive-wrong samples, can negative signal correct it?
-    if pos_wrong.sum() > 0:
-        neg_correct = (neg_pred == labels)
-        comb_correct = (comb_pred == labels)
-        neg_fixes_pos = (pos_wrong & neg_correct).float().sum().item()
-        neg_fix_rate = neg_fixes_pos / pos_wrong.float().sum().item() * 100
-        comb_fixes_pos = (pos_wrong & comb_correct).float().sum().item()
-        comb_fix_rate = comb_fixes_pos / pos_wrong.float().sum().item() * 100
-    else:
-        neg_fix_rate = comb_fix_rate = 0.0
+        # 修复率
+        if pos_wrong.sum() > 0:
+            neg_fixes = (pos_wrong & (neg_pred == labels)).float().sum().item()
+            neg_fix_rate = neg_fixes / pos_wrong.float().sum().item() * 100
+            comb_fixes = (pos_wrong & (comb_pred == labels)).float().sum().item()
+            comb_fix_rate = comb_fixes / pos_wrong.float().sum().item() * 100
+        else:
+            neg_fix_rate = comb_fix_rate = 0.0
 
-    # ---- Logging ----
-    logger.info("=" * 60)
-    logger.info(f"Positive (standard CLIP)  Accuracy = {pos_acc:.2f}%")
-    logger.info(f"Negative (lowest=pred)    Accuracy = {neg_acc:.2f}%")
-    logger.info(f"Combined (pos - neg)      Accuracy = {comb_acc:.2f}%")
-    logger.info(f"Negative rank-1 rate (true cls lowest neg) = {neg_rank1:.2f}%")
-    logger.info(f"Mean rank of true class in neg_logits = {mean_neg_rank:.2f} (0=best)")
-    logger.info(f"Negative fixes {neg_fix_rate:.1f}% of CLIP's mistakes")
-    logger.info(f"Combined  fixes {comb_fix_rate:.1f}% of CLIP's mistakes")
+        results[key] = {
+            'template': NEG_TEMPLATES[key],
+            'neg_acc': neg_acc, 'comb_acc': comb_acc,
+            'neg_rank1': neg_rank1, 'mean_neg_rank': mean_neg_rank,
+            'neg_fix_rate': neg_fix_rate, 'comb_fix_rate': comb_fix_rate,
+        }
 
-    # Per-class breakdown
+    # ---- 输出对比表 ----
+    logger.info("=" * 90)
+    logger.info(f"Baseline CLIP zero-shot (positive): {pos_acc:.2f}%  (N={N}, C={C})")
+    logger.info("")
+    header = (f"{'Template':<16s} {'Prompt':<44s} "
+              f"{'NegAcc':>7s} {'CombAcc':>7s} {'Rank1':>7s} {'NFix%':>7s} {'CFix%':>7s}")
+    logger.info(header)
+    logger.info("-" * 90)
+    for key, r in results.items():
+        logger.info(f"{key:<16s} {r['template']:<44s} "
+                    f"{r['neg_acc']:7.2f}% {r['comb_acc']:7.2f}% "
+                    f"{r['neg_rank1']:7.2f}% {r['neg_fix_rate']:7.1f}% {r['comb_fix_rate']:7.1f}%")
+    logger.info("=" * 90)
+
+    # 找到最好的模板，打印per-class详情
+    best_key = max(results, key=lambda k: results[k]['comb_acc'])
+    best = results[best_key]
+    logger.info(f"\nBest template: [{best_key}] \"{best['template']}\"")
+    logger.info(f"  NegAcc={best['neg_acc']:.2f}%  CombAcc={best['comb_acc']:.2f}%  "
+                f"Rank1={best['neg_rank1']:.2f}%  NFix={best['neg_fix_rate']:.1f}%")
+
+    # Per-class breakdown (baseline)
     matrix = confusion_matrix(labels, pos_pred)
     per_cls_acc = matrix.diagonal() / matrix.sum(axis=1) * 100
-    logger.info("Per-class positive accuracy:")
+    logger.info("\nPer-class positive accuracy:")
     for i, name in enumerate(classnames):
         logger.info(f"  {i:3d} {name:20s}: {per_cls_acc[i]:5.1f}%")
-    logger.info("=" * 60)
 
-    # ---- Return for potential use in ProDe ----
-    return {
-        'pos_acc': pos_acc,
-        'neg_acc': neg_acc,
-        'comb_acc': comb_acc,
-        'neg_rank1': neg_rank1,
-        'mean_neg_rank': mean_neg_rank,
-        'neg_fix_rate': neg_fix_rate,
-        'comb_fix_rate': comb_fix_rate,
-    }
+    return {'pos_acc': pos_acc, 'best_template': best_key, 'results': results}
 
 
 def evaluate_semantic_prior(cfg):
