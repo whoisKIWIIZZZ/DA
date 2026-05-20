@@ -198,7 +198,7 @@ def evaluate_learnable_neg(cfg):
 
     arch = getattr(getattr(cfg, 'ProDe', None), 'ARCH', None) or 'ViT-B/32'
     logger.info(f"Loading CLIP: {arch}")
-    clip_model, _ = clip.load(arch)
+    clip_model = clip.load(arch)[0]
     clip_model.float().cuda()
     clip_model.eval()
 
