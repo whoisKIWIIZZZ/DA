@@ -1,3 +1,4 @@
+import os
 import os.path as osp
 import numpy as np
 import torch
@@ -179,15 +180,6 @@ def evaluate_zeroshot_neg(cfg):
     return {'pos_acc': pos_acc, 'best_template': best_key, 'results': results}
 
 
-def data_load_src(cfg):
-    """加载 source + target 数据"""
-    dset_loaders = data_load(cfg)
-    txt_src = open(cfg.s_dset_path).readlines()
-    dsets_src = ImageList_idx(txt_src, transform=image_test_clip())
-    dset_loaders["source"] = DataLoader(dsets_src, batch_size=cfg.TEST.BATCH_SIZE * 3,
-                                         shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    return dset_loaders
-
 
 def evaluate_learnable_neg(cfg):
     """
@@ -234,12 +226,13 @@ def evaluate_learnable_neg(cfg):
             feats = clip_model.encode_text(tokens)
             neg_text_feats[key] = feats / feats.norm(dim=-1, keepdim=True)
 
-    # 数据
-    dset_loaders = data_load_src(cfg)
-    src_loader = dset_loaders["source"]
-    tgt_loader = dset_loaders["test"]
-    logger.info(f"S={cfg.domain[cfg.SETTING.S]}: {len(src_loader.dataset)}, "
-                f"T={cfg.domain[cfg.SETTING.T]}: {len(tgt_loader.dataset)}")
+    # ===== 加载 Source 数据 =====
+    txt_src = open(cfg.s_dset_path).readlines()
+    dsets_src = ImageList_idx(txt_src, transform=image_test_clip())
+    src_loader = DataLoader(dsets_src, batch_size=cfg.TEST.BATCH_SIZE * 3,
+                            shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    s_name = cfg.domain[cfg.SETTING.S]
+    logger.info(f"S={s_name}: {len(src_loader.dataset)} samples")
 
     # ===== 在 Source 上训练 neg_embed =====
     optimizer = torch.optim.Adam([neg_embed], lr=1e-3, weight_decay=1e-4)
@@ -272,67 +265,8 @@ def evaluate_learnable_neg(cfg):
             logger.info(f"  Epoch {epoch+1:3d}: loss={total_loss/len(src_loader):.4f}, "
                         f"src_neg_acc={correct/total*100:.2f}%")
 
-    # ===== 提取 Target 图像特征 =====
-    logger.info(f"\nEvaluating on T ({cfg.domain[cfg.SETTING.T]})...")
-    all_img_feats = []
-    all_labels = []
-    with torch.no_grad():
-        for data in tgt_loader:
-            inputs, labels = data[0].cuda(), data[1]
-            img_feats = clip_model.encode_image(inputs)
-            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-            all_img_feats.append(img_feats.cpu())
-            all_labels.append(labels)
-
-    img_feats = torch.cat(all_img_feats, dim=0)   # CPU
-    labels = torch.cat(all_labels, dim=0)
-    N = img_feats.shape[0]
-
-    # Baseline
-    pos_logits = logit_scale * img_feats @ pos_text.cpu().t()
-    _, pos_pred = torch.max(pos_logits, dim=1)
-    pos_acc = (pos_pred == labels).float().mean().item() * 100
-    pos_wrong = ~(pos_pred == labels)
-
-    # 文本编码 neg（原方案）
-    text_results = {}
-    for key, neg_feats in neg_text_feats.items():
-        neg_feats_cpu = neg_feats.cpu()
-        nlogits = logit_scale * img_feats @ neg_feats_cpu.t()
-        _, npred = torch.min(nlogits, dim=1)
-        nacc = (npred == labels).float().mean().item() * 100
-        combined = pos_logits - nlogits
-        _, cpred = torch.max(combined, dim=1)
-        cacc = (cpred == labels).float().mean().item() * 100
-        text_results[key] = {'neg_acc': nacc, 'comb_acc': cacc}
-
-    # 可学习 neg（S→T）
-    neg_embed_cpu = neg_embed.detach().cpu()
-    neg_logits = logit_scale * img_feats @ neg_embed_cpu.t()
-    _, neg_pred = torch.min(neg_logits, dim=1)
-    neg_acc = (neg_pred == labels).float().mean().item() * 100
-
-    combined = pos_logits - neg_logits
-    _, comb_pred = torch.max(combined, dim=1)
-    comb_acc = (comb_pred == labels).float().mean().item() * 100
-
-    # Rank 分析
-    neg_ranks = neg_logits.argsort(dim=1).argsort(dim=1)
-    true_neg_ranks = neg_ranks.gather(1, labels.unsqueeze(1)).float()
-    rank1 = (true_neg_ranks == 0).float().mean().item() * 100
-    mean_rank = true_neg_ranks.mean().item()
-
-    # Fix rate
-    if pos_wrong.sum() > 0:
-        neg_fixes = (pos_wrong & (neg_pred == labels)).float().sum().item()
-        neg_fix_rate = neg_fixes / pos_wrong.float().sum().item() * 100
-        comb_fixes = (pos_wrong & (comb_pred == labels)).float().sum().item()
-        comb_fix_rate = comb_fixes / pos_wrong.float().sum().item() * 100
-    else:
-        neg_fix_rate = comb_fix_rate = 0.0
-
     # ===== 保存模型 =====
-    save_path = osp.join(cfg.output_dir_src, f"learned_neg_{cfg.domain[cfg.SETTING.S]}.pt")
+    save_path = osp.join(cfg.output_dir_src, f"learned_neg_{s_name}.pt")
     os.makedirs(cfg.output_dir_src, exist_ok=True)
     torch.save({
         'neg_embed': neg_embed.detach().cpu(),
@@ -346,30 +280,145 @@ def evaluate_learnable_neg(cfg):
     }, save_path)
     logger.info(f"Saved: {save_path}")
 
-    # ===== 输出对比 =====
-    logger.info("=" * 90)
-    logger.info(f"Baseline CLIP zero-shot (positive): {pos_acc:.2f}%  (N={N}, C={C})")
-    logger.info(f"S={cfg.domain[cfg.SETTING.S]} → T={cfg.domain[cfg.SETTING.T]}")
-    logger.info("")
-    header = (f"{'Method':<35s} {'NegAcc':>8s} {'CombAcc':>8s} "
-              f"{'Rank1':>8s} {'NFix%':>8s} {'CFix%':>8s}")
-    logger.info(header)
-    logger.info("-" * 90)
-    for key in ["not", "without", "other_than"]:
-        r = text_results[key]
-        logger.info(f"  text-encoded ({key:12s})     {r['neg_acc']:7.2f}% {r['comb_acc']:7.2f}%")
-    logger.info(f"  learned free embed (S→T)    {neg_acc:7.2f}% {comb_acc:7.2f}% "
-                f"{rank1:7.2f}% {neg_fix_rate:7.1f}% {comb_fix_rate:7.1f}%")
-    logger.info(f"  (mean rank of true class: {mean_rank:.2f})")
-    logger.info("=" * 90)
+    # ===== 遍历所有 T 域评估 =====
+    pos_text_cpu = pos_text.cpu()
+    neg_embed_cpu = neg_embed.detach().cpu()
+    neg_text_cpu = {k: v.cpu() for k, v in neg_text_feats.items()}
 
-    return {
-        'pos_acc': pos_acc,
-        'text_results': text_results,
-        'learned_neg_acc': neg_acc, 'learned_comb_acc': comb_acc,
-        'neg_rank1': rank1, 'mean_neg_rank': mean_rank,
-        'neg_fix_rate': neg_fix_rate, 'comb_fix_rate': comb_fix_rate,
-    }
+    all_results = {}  # t_name -> metrics
+
+    for t_idx, t_name in enumerate(cfg.domain):
+        test_path = cfg.FOLDER + cfg.SETTING.DATASET + '/' + t_name + '_list.txt'
+        txt_test = open(test_path).readlines()
+        dsets_t = ImageList_idx(txt_test, transform=image_test_clip())
+        tgt_loader = DataLoader(dsets_t, batch_size=cfg.TEST.BATCH_SIZE * 3,
+                                shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
+
+        logger.info(f"Evaluating T={t_name} ({len(tgt_loader.dataset)} samples)...")
+
+        all_img_feats = []
+        all_labels = []
+        with torch.no_grad():
+            for data in tgt_loader:
+                inputs, labels = data[0].cuda(), data[1]
+                img_feats = clip_model.encode_image(inputs)
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+                all_img_feats.append(img_feats.cpu())
+                all_labels.append(labels)
+
+        img_feats = torch.cat(all_img_feats, dim=0)
+        labels = torch.cat(all_labels, dim=0)
+
+        # 辅助函数：计算全套指标
+        def compute_metrics(logits, is_neg=True):
+            """is_neg=True: argmin 预测; is_neg=False: argmax 预测"""
+            if is_neg:
+                _, pred = torch.min(logits, dim=1)
+            else:
+                _, pred = torch.max(logits, dim=1)
+            acc = (pred == labels).float().mean().item() * 100
+
+            ranks = logits.argsort(dim=1).argsort(dim=1)
+            if is_neg:
+                true_ranks = ranks.gather(1, labels.unsqueeze(1)).float()
+            else:
+                true_ranks = (C - 1 - ranks).gather(1, labels.unsqueeze(1)).float()
+            rank1 = (true_ranks == 0).float().mean().item() * 100
+            mean_rank = true_ranks.mean().item()
+
+            if pos_wrong.sum() > 0:
+                fixes = (pos_wrong & (pred == labels)).float().sum().item()
+                fix_rate = fixes / pos_wrong.float().sum().item() * 100
+            else:
+                fix_rate = 0.0
+            return acc, rank1, mean_rank, fix_rate
+
+        # Baseline: positive only
+        pos_logits = logit_scale * img_feats @ pos_text_cpu.t()
+        _, pos_pred = torch.max(pos_logits, dim=1)
+        pos_acc = (pos_pred == labels).float().mean().item() * 100
+        pos_wrong = ~(pos_pred == labels)
+
+        # 文本编码 neg
+        text_metrics = {}
+        for key in ["not", "without", "other_than"]:
+            nlogits = logit_scale * img_feats @ neg_text_cpu[key].t()
+            neg_acc, rank1, mean_rank, neg_fix = compute_metrics(nlogits, is_neg=True)
+            combined = pos_logits - nlogits
+            comb_acc, _, _, comb_fix = compute_metrics(combined, is_neg=False)
+            text_metrics[key] = {
+                'neg_acc': neg_acc, 'comb_acc': comb_acc,
+                'rank1': rank1, 'mean_rank': mean_rank,
+                'neg_fix': neg_fix, 'comb_fix': comb_fix,
+            }
+
+        # 可学习 neg (S→T)
+        neg_logits = logit_scale * img_feats @ neg_embed_cpu.t()
+        neg_acc, rank1, mean_rank, neg_fix = compute_metrics(neg_logits, is_neg=True)
+        combined = pos_logits - neg_logits
+        comb_acc, _, _, comb_fix = compute_metrics(combined, is_neg=False)
+
+        all_results[t_name] = {
+            'N': img_feats.shape[0], 'pos_acc': pos_acc,
+            'text': text_metrics,
+            'learned': {
+                'neg_acc': neg_acc, 'comb_acc': comb_acc,
+                'rank1': rank1, 'mean_rank': mean_rank,
+                'neg_fix': neg_fix, 'comb_fix': comb_fix,
+            },
+        }
+
+    # ===== 输出总表 =====
+    logger.info("")
+    logger.info("=" * 100)
+    logger.info(f"S = {s_name}  |  C = {C}  |  arch = {arch}")
+    logger.info("")
+
+    # 表头
+    hdr = (f"{'T':>12s} | {'PosAcc':>7s} | "
+           f"{'NegAcc':>7s} {'CombAcc':>7s} {'Rank1':>7s} {'NFix%':>7s} {'CFix%':>7s} | "
+           f"{'txt-Neg':>7s} {'txt-Cmb':>7s}")
+    sep = "-" * len(hdr.expandtabs())
+    logger.info(hdr)
+    logger.info(sep)
+
+    for t_name, r in all_results.items():
+        is_src = "(S)" if t_name == s_name else ""
+        L = r['learned']
+        # 取最好的文本模板（other_than 通常最优）
+        txt = r['text']['other_than']
+
+        logger.info(
+            f"{t_name+' '+is_src:>12s} | {r['pos_acc']:6.2f}% | "
+            f"{L['neg_acc']:6.2f}% {L['comb_acc']:6.2f}% "
+            f"{L['rank1']:6.2f}% {L['neg_fix']:6.1f}% {L['comb_fix']:6.1f}% | "
+            f"{txt['neg_acc']:6.2f}% {txt['comb_acc']:6.2f}%"
+        )
+
+    # 统计跨域均值（不含 S 自身）
+    cross_t = [r for t_name, r in all_results.items() if t_name != s_name]
+    if cross_t:
+        avg_pos = np.mean([r['pos_acc'] for r in cross_t])
+        avg_neg = np.mean([r['learned']['neg_acc'] for r in cross_t])
+        avg_comb = np.mean([r['learned']['comb_acc'] for r in cross_t])
+        avg_rank1 = np.mean([r['learned']['rank1'] for r in cross_t])
+        avg_nfix = np.mean([r['learned']['neg_fix'] for r in cross_t])
+        avg_cfix = np.mean([r['learned']['comb_fix'] for r in cross_t])
+        avg_txt_neg = np.mean([r['text']['other_than']['neg_acc'] for r in cross_t])
+        avg_txt_cmb = np.mean([r['text']['other_than']['comb_acc'] for r in cross_t])
+
+        logger.info(sep)
+        logger.info(
+            f"{'AVG (cross)':>12s} | {avg_pos:6.2f}% | "
+            f"{avg_neg:6.2f}% {avg_comb:6.2f}% "
+            f"{avg_rank1:6.2f}% {avg_nfix:6.1f}% {avg_cfix:6.1f}% | "
+            f"{avg_txt_neg:6.2f}% {avg_txt_cmb:6.2f}%"
+        )
+
+    logger.info("=" * 100)
+    logger.info(f"Model saved: {save_path}")
+
+    return {'s_name': s_name, 'all_results': all_results, 'save_path': save_path}
 
 
 def evaluate_semantic_prior(cfg):
