@@ -98,16 +98,16 @@ def evaluate_zeroshot_neg(cfg):
 
             img_feats = clip_model.encode_image(inputs)
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-            all_img_feats.append(img_feats.cpu())
-            all_labels.append(labels)
+            all_img_feats.append(img_feats)
+            all_labels.append(labels.cpu())
 
-    img_feats = torch.cat(all_img_feats, dim=0)  # (N, D)
-    labels = torch.cat(all_labels, dim=0)          # (N,)
+    img_feats = torch.cat(all_img_feats, dim=0)  # (N, D), on GPU
+    labels = torch.cat(all_labels, dim=0)          # (N,), on CPU
     N = img_feats.shape[0]
     logger.info(f"Test samples: {N}")
 
-    # 正prompt预测（基线）
-    pos_logits = logit_scale * img_feats @ pos_text_feats.t()
+    # 正prompt预测（基线）—— 结果移回CPU
+    pos_logits = (logit_scale * img_feats @ pos_text_feats.t()).cpu()
     _, pos_pred = torch.max(pos_logits, dim=1)
     pos_acc = (pos_pred == labels).float().mean().item() * 100
     pos_wrong = ~(pos_pred == labels)
@@ -115,7 +115,7 @@ def evaluate_zeroshot_neg(cfg):
     # 逐模板评估
     results = {}
     for key, neg_feats in neg_text_feats.items():
-        neg_logits = logit_scale * img_feats @ neg_feats.t()
+        neg_logits = (logit_scale * img_feats @ neg_feats.t()).cpu()
 
         # argmin 预测
         _, neg_pred = torch.min(neg_logits, dim=1)
