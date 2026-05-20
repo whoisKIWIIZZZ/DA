@@ -347,7 +347,8 @@ def test_time_tuning(mypromt, inputs, optimizer, cfg, target_output):
     for j in range(cfg.ProDe.TTA_STEPS):
         with torch.amp.autocast('cuda'):
             output_logits, _ = mypromt(inputs)
-            output = nn.Softmax(dim=1)(output_logits)
+            output_logits_known = output_logits[:, :cfg.class_num]
+            output = nn.Softmax(dim=1)(output_logits_known)
             iic_loss = IID_losses.IID_loss_old(output, target_output)
         optimizer.zero_grad()
         iic_loss.backward()
