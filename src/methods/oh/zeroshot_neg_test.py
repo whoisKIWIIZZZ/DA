@@ -331,6 +331,21 @@ def evaluate_learnable_neg(cfg):
     else:
         neg_fix_rate = comb_fix_rate = 0.0
 
+    # ===== 保存模型 =====
+    save_path = osp.join(cfg.output_dir_src, f"learned_neg_{cfg.domain[cfg.SETTING.S]}.pt")
+    os.makedirs(cfg.output_dir_src, exist_ok=True)
+    torch.save({
+        'neg_embed': neg_embed.detach().cpu(),
+        'pos_text': pos_text.cpu(),
+        'classnames': classnames,
+        'dataset': cfg.SETTING.DATASET,
+        'arch': arch,
+        'C': C,
+        'D': D,
+        'logit_scale': logit_scale,
+    }, save_path)
+    logger.info(f"Saved: {save_path}")
+
     # ===== 输出对比 =====
     logger.info("=" * 90)
     logger.info(f"Baseline CLIP zero-shot (positive): {pos_acc:.2f}%  (N={N}, C={C})")
