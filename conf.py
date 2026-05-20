@@ -299,6 +299,9 @@ _C.ProDe.REP_PAR = 0.1
 _C.ProDe.REP_TOPK = 5
 _C.ProDe.LOAD = None
 _C.ProDe.PROXY_WEIGHT= 0.3
+
+_C.LEARNABLE_NEG = CfgNode()
+_C.LEARNABLE_NEG.TRAIN = True
 # --------------------------------- DIFO++ options ----------------------------- #
 _C.DIFOPLUS = CfgNode()
 
