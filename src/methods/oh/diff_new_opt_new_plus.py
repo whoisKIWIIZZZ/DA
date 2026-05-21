@@ -657,7 +657,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         clip_all_output = torch.cat([base_clip_all_output, neg_clip_all_output], dim=1)
         clip_final = logit_clip_score_include_hidden[:,:cfg.class_num]
         #clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
-        _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
+        _, predict = torch.max(base_softmax_out, 1)  # 从bank来的
         _, clip_predict = torch.max(clip_final, 1)  # 从test clip来
 
         predict_one = np.eye(K)[predict.cpu()]
