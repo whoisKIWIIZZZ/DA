@@ -299,6 +299,8 @@ _C.ProDe.REP_PAR = 0.1
 _C.ProDe.REP_TOPK = 5
 _C.ProDe.LOAD = None
 _C.ProDe.PROXY_WEIGHT= 0.3
+_C.ProDe.USE_LEARNED_NEG = True
+_C.ProDe.NEG_ALPHA = 0.5
 
 _C.LEARNABLE_NEG = CfgNode()
 _C.LEARNABLE_NEG.TRAIN = True

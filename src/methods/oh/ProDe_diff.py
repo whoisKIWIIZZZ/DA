@@ -152,7 +152,57 @@ def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_outpu
     return output
 
 @torch.no_grad()
-def analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders):
+@torch.no_grad()
+def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
+    """评估负向嵌入在测试集上的表现"""
+    all_pos_logits = []
+    all_neg_logits = []
+    all_labels = []
+
+    for data in dset_loaders["test"]:
+        inputs = data[0][0].cuda()
+        labels = data[1]
+
+        img_feats = model.image_encoder(inputs.type(model.dtype))
+        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+        text_feats = model.get_text_features()
+
+        pos_logits = model.logit_scale.exp() * img_feats @ text_feats.t()
+        neg_logits = model.logit_scale.exp() * img_feats @ neg_embed
+
+        all_pos_logits.append(pos_logits.cpu())
+        all_neg_logits.append(neg_logits.cpu())
+        all_labels.append(labels)
+
+    pos_logits = torch.cat(all_pos_logits)
+    neg_logits = torch.cat(all_neg_logits)
+    labels = torch.cat(all_labels)
+    C = neg_logits.shape[1]
+
+    pos_pred = pos_logits.argmax(1)
+    pos_acc = (pos_pred == labels).float().mean().item() * 100
+    pos_wrong = ~(pos_pred == labels)
+
+    neg_pred = neg_logits.argmin(1)
+    neg_acc = (neg_pred == labels).float().mean().item() * 100
+
+    combined = pos_logits - neg_alpha * neg_logits
+    comb_pred = combined.argmax(1)
+    comb_acc = (comb_pred == labels).float().mean().item() * 100
+
+    ranks = neg_logits.argsort(dim=1).argsort(dim=1)
+    true_ranks = ranks.gather(1, labels.unsqueeze(1)).float()
+    rank1 = (true_ranks == 0).float().mean().item() * 100
+    mean_rank = true_ranks.mean().item()
+
+    nfix = (pos_wrong & (neg_pred == labels)).float().sum().item() / max(pos_wrong.sum().item(), 1) * 100
+    cfix = (pos_wrong & (comb_pred == labels)).float().sum().item() / max(pos_wrong.sum().item(), 1) * 100
+
+    return {'pos_acc': pos_acc, 'neg_acc': neg_acc, 'comb_acc': comb_acc,
+            'rank1': rank1, 'mean_rank': mean_rank, 'neg_fix': nfix, 'comb_fix': cfix}
+
+
+def analyze_ensemble(cfg, netF, netB, netC, model, dset_loaders):
     text_feats = model.get_text_features()
     logit_scale = model.logit_scale.exp()
 
@@ -365,6 +415,18 @@ def train_target(cfg):
     modelpath = cfg.output_dir_src + '/source_C.pt'
     netC.load_state_dict(torch.load(modelpath))
 
+    # --- 加载 learned neg_embed（PositiveCoOp 风格，显式 CE 训练） ---
+    neg_embed = None
+    opt_neg = None
+    if cfg.ProDe.USE_LEARNED_NEG:
+        neg_path = osp.join(cfg.output_dir_src, f"learned_neg_{cfg.domain[cfg.SETTING.S]}.pt")
+        if osp.exists(neg_path):
+            ckpt = torch.load(neg_path, map_location='cpu')
+            neg_embed = nn.Parameter(ckpt['neg_embed'].cuda())
+            logger.info(f"Loaded learned neg_embed: {neg_path}  shape={neg_embed.shape}")
+        else:
+            logger.info(f"Learned neg_embed not found: {neg_path}, skipping")
+
     # --- netC_proxy: N+N classifier for IID loss ---
     netC_proxy = network.feat_classifier(type='wn', class_num=cfg.class_num * 2, bottleneck_dim=cfg.bottleneck).cuda()
     with torch.no_grad():
@@ -374,13 +436,8 @@ def train_target(cfg):
         torch.nn.init.kaiming_uniform_(netC_proxy.fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
         netC_proxy.fc.bias.data[cfg.class_num:].fill_(-3.0)
 
-    # --- Text-guided semantic similarity matrix ---
+    # --- Text-guided semantic similarity（已由 learned neg_embed 替代） ---
     model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
-    with torch.no_grad():
-        text_feats = model.get_text_features()
-        class_sim = text_feats @ text_feats.T
-        class_sim.fill_diagonal_(0)
-        class_sim = class_sim / (class_sim.sum(dim=1, keepdim=True) + 1e-6)
 
     param_group = []
     param_group_ib = []
@@ -405,6 +462,9 @@ def train_target(cfg):
     optimizer_ib = op_copy(optimizer_ib)
     opt_proxyC = optim.SGD([{'params': netC_proxy.parameters(), 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}])
     opt_proxyC = op_copy(opt_proxyC)
+    if neg_embed is not None:
+        opt_neg = optim.SGD([{'params': neg_embed, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}])
+        opt_neg = op_copy(opt_neg)
     optim_state = deepcopy(optimizer_ib.state_dict())
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
     interval_iter = max_iter // cfg.TEST.INTERVAL
@@ -449,38 +509,40 @@ def train_target(cfg):
 
         inputs_test_clip = inputs_test_augs
 
-        clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new)
+        clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg,
+                                           outputs_test_new)
         clip_score = clip_score.float()
 
-        with torch.no_grad():
-            # Text-guided negative prior: log-space residu
-            p = torch.softmax(clip_score, dim=1)
-            neg_prior = p  @ class_sim
-            res = neg_prior - p
-
-            residual = torch.log((p - 0.1 * res).clamp(min=1e-6)) - torch.log(p.clamp(min=1e-6))
-            # Scale log-prob residual to logit space (logit_scale ≈ 100 for ViT-B/32)
-            residual = residual * model.logit_scale.exp()
+        # 负向嵌入：显式 CE 训练（仿 pretrain），然后组合
+        if neg_embed is not None:
+            img_feats = model.image_encoder(inputs_test_clip.type(model.dtype))
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            neg_logits = model.logit_scale.exp() * img_feats @ neg_embed
 
             term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
             term_b = clip_score.cuda()
-            term_c = cfg.ProDe.PROXY_WEIGHT * residual
-            new_clip = term_a + term_b + term_c
+            new_clip = term_a + term_b - cfg.ProDe.NEG_ALPHA * neg_logits
 
-            if iter_num % 50 == 1:
-                logger.info(
-                    'term_a(base-bank): mean={:.2f} std={:.2f} | '
-                    'term_b(clip_score): mean={:.2f} std={:.2f} | '
-                    'term_c(w*residual): mean={:.3f} std={:.3f} | '
-                    'p max/mean={:.3f}/{:.3f} | '
-                    'neg_prior max/mean={:.3f}/{:.3f}'.format(
-                        term_a.mean().item(), term_a.std().item(),
-                        term_b.mean().item(), term_b.std().item(),
-                        term_c.mean().item(), term_c.std().item(),
-                        p.max().item(), p.mean().item(),
-                        neg_prior.max().item(), neg_prior.mean().item()))
+            # 显式训练 neg_embed：真类的 neg_logits 应最小
+            with torch.no_grad():
+                pseudo_labels = new_clip.argmax(1)
+            loss_neg = nn.CrossEntropyLoss()(-neg_logits, pseudo_labels)
+            opt_neg.zero_grad()
+            loss_neg.backward()
+            opt_neg.step()
+        else:
+            term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
+            term_b = clip_score.cuda()
+            new_clip = term_a + term_b
+
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
+
+        if iter_num % 50 == 1:
+            neg_str = f' neg_loss={loss_neg.item():.4f}' if (neg_embed is not None) else ''
+            logger.info(
+                f'Iter {iter_num}: term_a(mean/std)={term_a.mean().item():.2f}/{term_a.std().item():.2f}'
+                f' term_b={term_b.mean().item():.2f}/{term_b.std().item():.2f}{neg_str}')
 
         # N+N IID loss with temperature-controlled proxy
         outputs_proxy2N = netC_proxy(features_test)
@@ -520,19 +582,18 @@ def train_target(cfg):
             netF.eval()
             netB.eval()
             netC.eval()
-            # Recompute class_sim with updated prompt
-            with torch.no_grad():
-                text_feats = model.get_text_features()
-                class_sim = text_feats @ text_feats.T
-                class_sim.fill_diagonal_(0)
-                class_sim = class_sim / (class_sim.sum(dim=1, keepdim=True) + 1e-6)
-            analyze_ensemble(cfg, netF, netB, netC, model, class_sim, dset_loaders)
+            analyze_ensemble(cfg, netF, netB, netC, model, dset_loaders)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss)
+
+            # 负向嵌入评估
+            if neg_embed is not None:
+                nm = eval_neg_metrics(dset_loaders, model, neg_embed, cfg.ProDe.NEG_ALPHA)
+                log_str += '\n  NegEval: PosAcc={pos_acc:.1f}% NegAcc={neg_acc:.1f}% CombAcc={comb_acc:.1f}% Rank1={rank1:.1f}% meanR={mean_rank:.1f} NFix={neg_fix:.1f}% CFix={comb_fix:.1f}%'.format(**nm)
 
             logger.info(log_str)
             netF.train()
