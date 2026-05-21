@@ -269,7 +269,8 @@ def evaluate_learnable_neg(cfg):
                     img_feats = clip_model.encode_image(inputs)
                     img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
-                neg_logits = logit_scale * img_feats @ neg_embed.t()
+                neg_embed_norm = neg_embed / neg_embed.norm(dim=-1, keepdim=True)
+                neg_logits = logit_scale * img_feats @ neg_embed_norm.t()
                 loss = nn.CrossEntropyLoss()(-neg_logits, labels)
 
                 optimizer.zero_grad()
@@ -308,6 +309,7 @@ def evaluate_learnable_neg(cfg):
     # ===== 遍历所有 T 域评估 =====
     pos_text_cpu = pos_text.cpu()
     neg_embed_cpu = neg_embed.detach().cpu()
+    neg_embed_cpu = neg_embed_cpu / neg_embed_cpu.norm(dim=-1, keepdim=True)  # L2 归一化，对齐 pos_text
     neg_text_cpu = {k: v.cpu() for k, v in neg_text_feats.items()}
 
     all_results = {}  # t_name -> metrics
