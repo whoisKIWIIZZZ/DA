@@ -463,11 +463,10 @@ def clip_text(model, text_features, inputs_test):
 
 #用于输出混合标签,并构造计算图(主要针对text_feature)     
 class promote_learning_diff_promote_learning(torch.nn.Module):
-    def __init__(self, cfg, clip_model):
+    def __init__(self, cfg, clip_model, neg_embed=None):
         super(promote_learning_diff_promote_learning, self).__init__()
         self.cfg = cfg
         self.clip_model = clip_model
-        self.class_num_hidden = cfg.class_num_hidden
         self.device = clip_model.visual.conv1.weight.device # 从clip_model获取设备信息
         self.ctx_init = "a_photo_of_a"
         self.n_ctx = 4
@@ -482,49 +481,14 @@ class promote_learning_diff_promote_learning(torch.nn.Module):
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.text_encoder = TextEncoder(self.clip_model)
 
-        use_random = cfg.DIFF_ALIGN.USE_NEG
-        print("use_random:",use_random)
-        if use_random == False:
-            if self.class_num_hidden > 0:
-                print(f"Initializing {self.class_num_hidden} learnable hidden prompt classes.")
-                # 获取特征维度
-                ctx_dim = clip_model.ln_final.weight.shape[0]
-                # 在正确的设备上创建向量
-                hidden_features_vectors = torch.empty(self.class_num_hidden, ctx_dim, dtype=clip_model.dtype, device=self.device)
-                torch.nn.init.kaiming_normal_(hidden_features_vectors, a=math.sqrt(5))
-                self.hidden_features = nn.Parameter(hidden_features_vectors)
-            else:
-                self.hidden_features = None
+        # 2. 使用预训练的负向嵌入替代隐藏类
+        if neg_embed is not None:
+            self.hidden_features = neg_embed
+            self.class_num_hidden = neg_embed.shape[0]
+            print(f"使用预训练负向嵌入: {self.class_num_hidden} 个负类原型")
         else:
-            classnames_for_negative_prompts = cfg.classname
-            
-
-            if self.class_num_hidden > 0:
-                print(f"Initializing {self.class_num_hidden} negative prompt classes.")
-            # Define the prompt prefix for negative prompts
-            # Assuming the base prefix is "a_photo_of"
-            negative_prompt_base_prefix = " a photo of not " 
-            
-            negative_prompts_list = []
-            for cls_name in classnames_for_negative_prompts:
-                # Format: "a_photo_of_not{cls}_"
-                # Replace spaces in class name with underscores for the format
-                #formatted_cls_name = cls_name.replace(" ", "_")
-                negative_prompt_string = f"{negative_prompt_base_prefix} {cls_name}"
-                negative_prompts_list.append(negative_prompt_string)
-                
-            # Tokenize the generated negative prompts
-            hidden_features = torch.cat([clip.tokenize(p) for p in negative_prompts_list]).to(clip_model.visual.conv1.weight.device)
-
-            with torch.no_grad():
-                embedding = self.clip_model.token_embedding(hidden_features).type(self.clip_model.dtype)
-                hidden_text_features = self.text_encoder(embedding,hidden_features)
-                hidden_text_features = hidden_text_features / hidden_text_features.norm(dim=-1, keepdim=True)
-
-            self.hidden_features = hidden_text_features[:self.class_num_hidden, :]
-
-
-        # --- End: Generate and tokenize negative prompts ---
+            self.hidden_features = None
+            self.class_num_hidden = 0
 
     def forward(self, img_inputs):
         # 1. 计算图像特征

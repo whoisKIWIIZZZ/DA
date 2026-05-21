@@ -3,7 +3,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torchvision import transforms
 # from src.utils import loss,prompt_tuning,IID_losses
 from src.utils import loss,IID_losses
@@ -17,7 +16,6 @@ import clip
 from src.utils.utils import *
 from src.utils.prompt_tuning_diff_new_optim_1130 import *
 from src.utils.loss import entropy
-from src.methods.oh.source_neg import NegProxyLinear
 
 logger = logging.getLogger(__name__)
 
@@ -340,30 +338,6 @@ def op_copy(optimizer):
     return optimizer
 
 
-def test_time_tuning(mypromt, inputs, optimizer, cfg, target_output):
-    target_output = target_output.cuda()
-    target_output = nn.Softmax(dim=1)(target_output)
-
-    for j in range(cfg.ProDe.TTA_STEPS):
-        with torch.amp.autocast('cuda'):
-            output_logits, _ = mypromt(inputs)
-            output_logits_known = output_logits[:, :cfg.class_num]
-            output = nn.Softmax(dim=1)(output_logits_known)
-            iic_loss = IID_losses.IID_loss_old(output, target_output)
-        optimizer.zero_grad()
-        iic_loss.backward()
-        optimizer.step()
-    return output
-
-def test_time_adapt_eval(input, mypromt, optimizer, optim_state, cfg, target_output):
-    optimizer.load_state_dict(optim_state)
-    output = test_time_tuning(mypromt, input, optimizer, cfg, target_output)
-    with torch.no_grad():
-        with torch.amp.autocast('cuda'):
-            logit_clip_score, text_features = mypromt(input)
-    return logit_clip_score, text_features
-
-
 def print_cfg(cfg):
     s = "==========================================\n"
     for arg, content in cfg.__dict__.items():
@@ -391,17 +365,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     clip_model.float()
     # 引入clip后，自构造text的输入
     text_inputs = clip_pre_text(cfg)  # 65*77
-    # --- Load negative proxy for CLIP modulation ---
-    feat_dim_neg = clip_model.visual.output_dim
-    neg_proxy = NegProxyLinear(feat_dim_neg, cfg.class_num).cuda()
-    neg_proxy_path = osp.join(cfg.output_dir_src, "source_C_aux_neg_head.pt")
-    if osp.exists(neg_proxy_path):
-        neg_proxy.load_state_dict(torch.load(neg_proxy_path))
-        logger.info(f"Loaded negative proxy from {neg_proxy_path}")
-    else:
-        logger.warning(f"Negative proxy not found at {neg_proxy_path}, run source_neg.py first")
-    # Proxy will be fine-tuned on target domain; start in train mode
-
     # 训练测试数据导入
     dset_loaders = data_load(cfg,preprocess)
 
@@ -413,68 +376,44 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
     netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
     netC = network.feat_classifier(type='wn', class_num=cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
+
+    # 加载预训练负向嵌入，替代可学习隐藏类
+    neg_embed = None
+    neg_path = osp.join(cfg.output_dir_src, f"learned_neg_{cfg.domain[cfg.SETTING.S]}.pt")
+    if osp.exists(neg_path):
+        ckpt = torch.load(neg_path, map_location='cpu')
+        neg_embed = ckpt['neg_embed'].cuda()
+        cfg.class_num_hidden = neg_embed.shape[0]
+        print(f"加载预训练负向嵌入: {cfg.class_num_hidden} 类, 路径: {neg_path}")
+    else:
+        print(f"警告: 未找到负向嵌入文件 {neg_path}, 跳过负类原型")
+        cfg.class_num_hidden = 0
+
     netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num + cfg.class_num_hidden, bottleneck_dim=cfg.bottleneck).cuda()
       # 提取用source数据训练出的模型
-    if False:
-        try:
-            modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/target_F_diff_align_TV_acc=89.92_2026-01-09 20:28:01.729294.pt"
-            netF.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/target_B_diff_align_TV_acc=89.92_2026-01-09 20:28:01.729294.pt"
-            netB.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/target_C_diff_align_TV_acc=89.92_2026-01-09 20:28:01.729294.pt"
-            netC.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/target_C_aux_diff_align_TV_acc=89.92_2026-01-09 20:28:01.729294.pt"
-            netC_aux.load_state_dict(torch.load(modelpath),strict=True)
-
-            copy_back_netC(netC,netC_aux,cfg.class_num)
-            print("load 89.92!")
+   
+    
+    modelpath = cfg.output_dir_src + '/source_F.pt'
+    netF.load_state_dict(torch.load(modelpath),strict=True)
+    modelpath = cfg.output_dir_src + '/source_B.pt'
+    netB.load_state_dict(torch.load(modelpath),strict=True)
+    modelpath = cfg.output_dir_src + '/source_C.pt'
+    netC.load_state_dict(torch.load(modelpath))
 
 
-        except:    
-            modelpath = cfg.output_dir_src + '/source_F.pt'
-            netF.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = cfg.output_dir_src + '/source_B.pt'
-            netB.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = cfg.output_dir_src + '/source_C.pt'
-            netC.load_state_dict(torch.load(modelpath))
+    old_fc = netC.fc
+    new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + cfg.class_num_hidden).cuda())
+    with torch.no_grad():
+        new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
+        new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
+        new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
 
-
-            old_fc = netC.fc
-            new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + cfg.class_num_hidden).cuda())
-            with torch.no_grad():
-                new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
-                new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
-                new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
-
-                if cfg.class_num_hidden >0:
-                    print("Yes,we use hidden classes.")
-                    torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
-                    new_fc.bias.data[cfg.class_num:].zero_()
-            netC_aux.fc = new_fc
-            netC.eval()
-    else:
-            print("normal")
-            modelpath = cfg.output_dir_src + '/source_F.pt'
-            netF.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = cfg.output_dir_src + '/source_B.pt'
-            netB.load_state_dict(torch.load(modelpath),strict=True)
-            modelpath = cfg.output_dir_src + '/source_C.pt'
-            netC.load_state_dict(torch.load(modelpath))
-
-
-            old_fc = netC.fc
-            new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + cfg.class_num_hidden).cuda())
-            with torch.no_grad():
-                new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
-                new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
-                new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
-
-                if cfg.class_num_hidden >0:
-                    print("Yes,we use hidden classes.")
-                    torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
-                    new_fc.bias.data[cfg.class_num:].zero_()
-            netC_aux.fc = new_fc
-            netC.eval()
+        if cfg.class_num_hidden >0:
+            print("Yes,we use hidden classes.")
+            torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
+            new_fc.bias.data[cfg.class_num:].zero_()
+    netC_aux.fc = new_fc
+    netC.eval()
 
     param_group = []
     param_group_C = []
@@ -513,9 +452,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
     opt_C = optim.SGD(param_group_C)
     opt_C = op_copy(opt_C)
-
-    # Proxy optimizer for target-domain fine-tuning (lower lr than source training)
-    opt_proxy = optim.Adam(neg_proxy.parameters(), lr=1e-4, weight_decay=1e-4)
 
     loader = dset_loaders["target"]
     num_sample = len(loader.dataset)
@@ -559,13 +495,10 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     text_features = None
 
 
-    mypromt = promote_learning_diff_promote_learning(cfg, clip_model).to(clip_model.visual.conv1.weight.device)
-
-    prompt_parameters = [mypromt.prompt_learner.ctx]
-    opt_clip = torch.optim.SGD(prompt_parameters, cfg.OPTIM.LR, weight_decay=5e-4, momentum=0.9, nesterov=False)
-    opt_clip = op_copy(opt_clip)
-    optim_state_clip = deepcopy(opt_clip.state_dict())
-
+    mypromt = promote_learning_diff_promote_learning(cfg, clip_model, neg_embed).to(clip_model.visual.conv1.weight.device)
+    # modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
+    # mypromt.prompt_learner.load_state_dict(torch.load(modelpath))
+   # mypromt.prompt_learner.ctx.register_hook(print_grad_hook)
     while iter_num < max_iter:
 
         current_aux = aux_begin + (aux_end - aux_begin) * (iter_num / max_iter)
@@ -615,9 +548,39 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             netC_aux.train()
 
 
+        logit_clip_score, text_features = mypromt(inputs_clip)
+        text_features_all = text_features
+        logit_clip_score_include_hidden = clip_text(clip_model, text_features_all, inputs_clip)
+        
+        # trainable_param = deepcopy(mypromt.prompt_learner.ctx)
+
+        if 'RN' in cfg.DIFF_ALIGN.ARCH:
+            prompt_lr = cfg.OPTIM.LR * 0.1
+            data_transform = image_test_50()
+        else:  # 走这一边
+            data_transform = image_test()
+            #prompt_lr = cfg.OPTIM.LR
+            if iter_num < 3000:
+                prompt_lr =cfg.OPTIM.LR
+            elif iter_num< 6000:
+                prompt_lr = 0.003
+            else:
+                prompt_lr = 0.001
+
+        try:
+            opt_clip.zero_grad()
+        except:
+            prompt_parameters = [mypromt.prompt_learner.ctx]
+            opt_clip = torch.optim.SGD(prompt_parameters, prompt_lr, weight_decay=5e-4, momentum=0.9,
+                                        nesterov=False)
+            opt_clip.zero_grad()
+            if mypromt.prompt_learner.ctx.grad is not None:
+                mypromt.prompt_learner.ctx.grad.data.zero_()
+
+        
         iter_num += 1
         lr_num = 2000 if cfg.SETTING.DATASET == 'office-home' else 10500
-        if iter_num < lr_num:
+        if iter_num < lr_num:  # 600,2000最好
             lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
         else:
             lr_scheduler2(optimizer, iter_num=iter_num, max_iter=max_iter)
@@ -628,11 +591,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         base_outputs_test = netC(features_classify)
         base_softmax_out = nn.Softmax(dim=1)(base_outputs_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
-
-        logit_clip_score, text_features = test_time_adapt_eval(
-            inputs_clip, mypromt, opt_clip, optim_state_clip, cfg, base_softmax_out.detach())
-        text_features_all = text_features
-        logit_clip_score_include_hidden = clip_text(clip_model, text_features_all, inputs_clip)
 
         source_score_bank[tar_idx] = 0.99*source_score_bank[tar_idx] + 0.01*target_score_bank[tar_idx]
         current_batch_scores = source_score_bank[tar_idx]
@@ -664,19 +622,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         K = base_softmax_out.size(1)
         
         base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
-        # Extract CLIP image features (frozen encoder)
-        with torch.no_grad():
-            clip_image_feat = clip_model.encode_image(inputs_clip)
-            clip_image_feat = clip_image_feat / clip_image_feat.norm(dim=-1, keepdim=True)
-        # Proxy forward (with grad, for fine-tuning loss below)
-        neg_logits, _ = neg_proxy(clip_image_feat)  # (B, N): >0 = "not class", <0 = "is class"
-        # Modulate CLIP in logit space: subtract neg_logits
-        #   neg_logits < 0 → adds to CLIP logit → boosts that class
-        #   neg_logits > 0 → subtracts from CLIP logit → suppresses that class
-        proxy_scale = getattr(cfg.DIFF_ALIGN, 'PROXY_SCALE', 0.1)
-        logit_clip_known = logit_clip_score_include_hidden[:, :cfg.class_num]
-        combined_logits = logit_clip_known - proxy_scale * neg_logits.detach()
-        clip_modulated = nn.Softmax(dim=1)(combined_logits)
+        clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
         _, clip_predict = torch.max(base_clip_all_output, 1)  # 从test clip来
         
@@ -705,24 +651,37 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         else:
             classifier_loss = torch.tensor(0.0).cuda()
 
-        # IID loss with negative-proxy-modulated CLIP target
+        neg_iter = 0
+        warmup_iter = 0
         warmup_iter = 80
-        softmax_out_known = nn.Softmax(dim=1)(outputs_test[:, :cfg.class_num])
-        loss_iid = IID_losses.IID_loss_old(
-            softmax_out_known[indices_greater].detach() if iter_num < warmup_iter else softmax_out_known[indices_greater],
-            clip_modulated[indices_greater]
+        neg_iter = 100 #officehome
+        #overclustering
+        bb = 1- current_aux
+        nnn = 1-current_aux if iter_num > neg_iter else 0.01
+        bn = -0.3
+        loss_aux,loss_mat = IID_losses.IID_loss(
+            cfg.class_num,
+            softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
+            clip_all_output[indices_greater],
+            bb,
+            nnn,
+            bn,#[CLS] - not a [CLS]
+            lamb = 1.0
         )
-        loss_iid = loss_iid * 1.5
+
+
+        # 设置打印选项，确保不换行且保留小数位
+        # np.set_printoptions(precision=4, suppress=True, linewidth=200)
+        
+        # print("\n" + "="*30)
+        # df = pd.DataFrame(loss_mat.detach().cpu().numpy())
+        # print(df.to_string()) 
+        
+        # print("="*30 + "\n")
+        m_base_sft = base_softmax_out.mean(dim=0) 
+        loss_iid = loss_aux*1.5
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
-
-        # Fine-tune proxy via CE with predict_mix as soft pseudo-labels.
-        # predict_mix = student+CLIP weighted fusion, same signal as cls_loss.
-        # indices_greater = confident samples (diff > margin), cleaner teacher.
-        loss_proxy = -(predict_mix[indices_greater].detach() * F.log_softmax(-neg_logits[indices_greater], dim=1)).sum(dim=1).mean()
-        loss_proxy = loss_proxy * 0.05
-
-        m_base_sft = base_softmax_out.mean(dim=0)
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
       
         with torch.no_grad():
@@ -731,50 +690,49 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         optimizer.zero_grad()
         opt_C.zero_grad()
         opt_aux.zero_grad()
-        opt_proxy.zero_grad()
-        total_loss = classifier_loss + loss_iid - cfg.DIFF_ALIGN.GENT_PAR * gentropy_loss + cfg.DIFF_ALIGN.LENT_PAR * loss_ent + loss_proxy
+        total_loss = classifier_loss + loss_iid - cfg.DIFF_ALIGN.GENT_PAR * gentropy_loss + cfg.DIFF_ALIGN.LENT_PAR * loss_ent
         total_loss.backward()
         optimizer.step()
         
         opt_C.step()
         opt_aux.step()
-        opt_proxy.step()
+        if use_clip:
+            if iter_num <  (max_iter/2):
+                with torch.no_grad():
+                    #opt_clip.step()
+                    promt_learning_rate = 0.002
+                    mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
+            else:
+                with torch.no_grad():
+                    #opt_clip.step()
+                    promt_learning_rate = 0.0001
+                    mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
-            # Proxy accuracy: argmax(softmax(-neg_logits)) vs ground truth
-            neg_proxy.eval()
-            proxy_correct = 0
-            proxy_total = 0
-            with torch.no_grad():
-                for clip_data in dset_loaders['clip_test']:
-                    clip_inputs = clip_data[0].cuda()
-                    clip_labels = clip_data[1].cuda()
-                    feats = clip_model.encode_image(clip_inputs)
-                    feats = feats / feats.norm(dim=-1, keepdim=True)
-                    proxy_pred = torch.argmax(-neg_proxy(feats)[0], dim=1)
-                    proxy_correct += (proxy_pred == clip_labels).sum().item()
-                    proxy_total += clip_labels.size(0)
-            proxy_acc = proxy_correct / proxy_total * 100
-            neg_proxy.train()
-
             if cfg.SETTING.DATASET == 'VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%, proxy={:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
-                                                                                     acc_s_te, proxy_acc,
+                acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, True)
+                
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
+                                                                                     acc_s_te,acc_s_te_aux,
                                                                                      total_loss,loss_iid,classifier_loss,gentropy_loss) + '\n' + acc_list
                 if iter_num == max_iter:
                     acc =acc_s_te
+               
+               # wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%, proxy={:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter,
-                                                                                     acc_s_te, proxy_acc,
+                acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter,
+                                                                                     acc_s_te,acc_s_te_aux,
                                                                                      total_loss)
 
                 if iter_num == max_iter:
                     acc = acc_s_te
+             #   wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
                     
             logger.info(log_str)
             netF.train()
