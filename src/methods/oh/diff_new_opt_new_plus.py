@@ -592,7 +592,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         base_softmax_out = nn.Softmax(dim=1)(base_outputs_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
 
-        source_score_bank[tar_idx] = 0.99*source_score_bank[tar_idx] + 0.01*target_score_bank[tar_idx]
+        abulations = beta_pre_1 * iter_num / max_iter + beta_pre_2 # 0.1~1.1
+        d = abulations / 10 #0.01~0.1
+        source_score_bank[tar_idx] = (1-d)*source_score_bank[tar_idx] + d*target_score_bank[tar_idx]
         current_batch_scores = source_score_bank[tar_idx]
         avg_score = current_batch_scores.mean().item()
 
@@ -609,7 +611,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
         if is_merge_stratg_use:
 
-            abulations = beta_pre_1 * iter_num / max_iter + beta_pre_2
+            
             data = np.random.exponential(scale=abulations, size=ln_sam)  # 0.5
             data[data > 1] = 1
         else:
@@ -624,7 +626,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
         clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
-        _, clip_predict = torch.max(base_clip_all_output, 1)  # 从test clip来
+        _, clip_predict = torch.max(base_clip_all_output - 0.5*clip_all_output[:,cfg.class_num:], 1)  # 从test clip来
         
         predict_one = np.eye(K)[predict.cpu()]
         
