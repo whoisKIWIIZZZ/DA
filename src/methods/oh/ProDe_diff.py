@@ -521,7 +521,7 @@ def train_target(cfg):
 
             term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
             term_b = clip_score.cuda()
-            new_clip = term_a + term_b - cfg.ProDe.NEG_ALPHA * neg_logits
+            new_clip = term_a + term_b - cfg.ProDe.NEG_ALPHA * neg_logits.detach()
 
             # 显式训练 neg_embed：真类的 neg_logits 应最小
             with torch.no_grad():
