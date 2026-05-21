@@ -390,6 +390,44 @@ def evaluate_learnable_neg(cfg):
         txt_nlogits = logit_scale * img_feats @ neg_text_cpu['other_than'].t()
         alpha_txt, comb_best_txt = sweep_alpha_neg(pos_logits, txt_nlogits, labels)
 
+        # ===== 诊断：pos vs neg 量级与互补性 =====
+        logger.info(f"--- 诊断 T={t_name} ---")
+        logger.info(f"pos_logits: mean={pos_logits.mean():.3f} std={pos_logits.std():.3f} "
+                    f"min={pos_logits.min():.3f} max={pos_logits.max():.3f}")
+        logger.info(f"neg_logits: mean={neg_logits.mean():.3f} std={neg_logits.std():.3f} "
+                    f"min={neg_logits.min():.3f} max={neg_logits.max():.3f}")
+
+        # pos: 真类在降序中的 rank（rank0=最高分=最好）
+        pos_rank_of_true = (pos_logits.argsort(descending=True) == labels.unsqueeze(1)).nonzero()[:, 1].float()
+        # neg: 真类在升序中的 rank（rank0=最低分=最好）
+        neg_rank_of_true = (neg_logits.argsort(dim=1) == labels.unsqueeze(1)).nonzero()[:, 1].float()
+        logger.info(f"pos true class rank (降序, rank0=最高): mean={pos_rank_of_true.mean():.2f} "
+                    f"median={pos_rank_of_true.median():.2f}")
+        logger.info(f"neg true class rank (升序, rank0=最低): mean={neg_rank_of_true.mean():.2f} "
+                    f"median={neg_rank_of_true.median():.2f}")
+
+        # 互补性核心：pos 错的样本里，neg 有没有把真类排在远离倒数的位置？
+        pos_pred = pos_logits.argmax(1)
+        neg_pred = neg_logits.argmin(1)
+        pos_correct = (pos_pred == labels)
+        pos_wrong = ~pos_correct
+        neg_excludes_correct = (neg_pred != labels)  # neg 正确 = 没把真类排到最低
+
+        logger.info(f"pos_acc={pos_correct.float().mean()*100:.1f}%")
+        logger.info(f"neg排除真类准确率(neg_pred != label)={neg_excludes_correct.float().mean()*100:.1f}%")
+
+        if pos_wrong.sum() > 0:
+            neg_rank_on_wrong = (neg_logits[pos_wrong].argsort(dim=1) == labels[pos_wrong].unsqueeze(1)).nonzero()[:, 1].float()
+            logger.info(f"pos错误样本({pos_wrong.sum().item()}个)上 neg true rank(升序): "
+                        f"mean={neg_rank_on_wrong.mean():.2f} median={neg_rank_on_wrong.median():.2f} "
+                        f"(越大越好, 远离倒数)")
+
+        # 交叉检查：pos 和 neg 同时错误的样本
+        both_wrong = pos_wrong & (neg_pred == labels)
+        logger.info(f"pos错且neg也错(neg把真类排到最低)={both_wrong.float().sum().item()}个 "
+                    f"({both_wrong.float().mean()*100:.1f}%)")
+        logger.info("-" * 60)
+
         all_results[t_name] = {
             'N': img_feats.shape[0], 'pos_acc': pos_acc,
             'text': text_metrics,
