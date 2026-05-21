@@ -446,7 +446,19 @@ def evaluate_learnable_neg(cfg):
             if gap > best_gap:
                 best_gap = gap
                 best_alpha = alpha_val.item()
-        logger.info(f"→ 最佳动态窗口: alpha={best_alpha:.2f} (wrong-right gap={best_gap:+.1f}%)")
+        logger.info(f"→ 固定最优: alpha={best_alpha:.2f} (wrong-right gap={best_gap:+.1f}%)")
+
+        # 置信度驱动动态 alpha：低置信 → alpha 大（neg 介入），高置信 → alpha 小（pos 独断）
+        pos_conf = pos_logits.softmax(1).max(1).values
+        dyn_alpha = ((1.0 - pos_conf) * 2.0).clamp(0, 1.5)  # (B,)
+        combined_dyn = pos_logits - dyn_alpha.unsqueeze(1) * neg_logits
+        acc_dyn = (combined_dyn.argmax(1) == labels).float().mean().item() * 100
+        acc_dyn_wrong = (combined_dyn[pos_wrong].argmax(1) == labels[pos_wrong]).float().mean().item() * 100
+        acc_dyn_right = (combined_dyn[pos_right].argmax(1) == labels[pos_right]).float().mean().item() * 100
+        gap_dyn = acc_dyn_wrong - acc_dyn_right
+        logger.info(f"→ 置信度动态 alpha: wrong={acc_dyn_wrong:.1f}% right={acc_dyn_right:.1f}% "
+                    f"all={acc_dyn:.1f}% gap={gap_dyn:+.1f}%  "
+                    f"α∈[{dyn_alpha.min():.2f},{dyn_alpha.max():.2f}] mean={dyn_alpha.mean():.2f}")
         logger.info("-" * 60)
 
         all_results[t_name] = {
