@@ -583,7 +583,7 @@ def train_target(cfg):
             netF.eval()
             netB.eval()
             netC.eval()
-            analyze_ensemble(cfg, netF, netB, netC, model, dset_loaders)
+            #analyze_ensemble(cfg, netF, netB, netC, model, dset_loaders)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, classifier_loss) + '\n' + acc_list
