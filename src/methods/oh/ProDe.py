@@ -280,7 +280,11 @@ def train_target(cfg):
         classifier_loss.backward()
         optimizer.step()
         #optimizer_ib.step()
-
+        with torch.no_grad():
+            logtis_bank[tar_idx] = (
+                0.9 * logtis_bank[tar_idx] +
+                0.1 * outputs_test.detach()
+            )
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
