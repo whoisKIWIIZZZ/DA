@@ -493,6 +493,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     iter_num = 0
     epoch_num = 0
     text_features = None
+    loss_neg = torch.tensor(0.0)
 
 
     mypromt = promote_learning_diff_promote_learning(cfg, clip_model, neg_embed).to(clip_model.visual.conv1.weight.device)
@@ -627,6 +628,25 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
         _, clip_predict = torch.max(base_clip_all_output - 0.5*clip_all_output[:,cfg.class_num:], 1)  # 从test clip来
+
+        # 负向嵌入显式 CE 训练
+        if mypromt.hidden_features is not None and mypromt.class_num_hidden > 0:
+            with torch.no_grad():
+                img_feats = mypromt.clip_model.encode_image(inputs_clip.type(mypromt.clip_model.dtype))
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            hidden_norm = mypromt.hidden_features / mypromt.hidden_features.norm(dim=-1, keepdim=True)
+            neg_logits = mypromt.clip_model.logit_scale.exp() * img_feats @ hidden_norm.t()
+            combined = base_clip_all_output - 0.5 * nn.Softmax(dim=1)(neg_logits)
+            with torch.no_grad():
+                pseudo_labels = combined.argmax(1)
+            loss_neg = nn.CrossEntropyLoss()(-neg_logits, pseudo_labels)
+            try:
+                opt_neg.zero_grad()
+            except:
+                opt_neg = torch.optim.SGD([mypromt.hidden_features], lr=cfg.OPTIM.LR * 0.1, weight_decay=0, momentum=0.9, nesterov=False)
+                opt_neg.zero_grad()
+            loss_neg.backward()
+            opt_neg.step()
         
         predict_one = np.eye(K)[predict.cpu()]
         
@@ -681,7 +701,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         
         # print("="*30 + "\n")
         m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux*1.5
+        loss_iid = loss_aux
         if use_iid == False:
             loss_iid = torch.tensor(0.0).cuda()
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
@@ -728,9 +748,10 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
                 acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter,
+                neg_str = f' neg={loss_neg.item():.4f}' if mypromt.hidden_features is not None else ''
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}{}'.format(cfg.name, iter_num, max_iter,
                                                                                      acc_s_te,acc_s_te_aux,
-                                                                                     total_loss)
+                                                                                     total_loss, neg_str)
 
                 if iter_num == max_iter:
                     acc = acc_s_te

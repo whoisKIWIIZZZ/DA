@@ -481,11 +481,11 @@ class promote_learning_diff_promote_learning(torch.nn.Module):
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.text_encoder = TextEncoder(self.clip_model)
 
-        # 2. 使用预训练的负向嵌入替代隐藏类
+        # 2. 使用预训练的负向嵌入替代隐藏类（可训练）
         if neg_embed is not None:
-            self.hidden_features = neg_embed
+            self.hidden_features = nn.Parameter(neg_embed)
             self.class_num_hidden = neg_embed.shape[0]
-            print(f"使用预训练负向嵌入: {self.class_num_hidden} 个负类原型")
+            print(f"使用预训练负向嵌入: {self.class_num_hidden} 个负类原型（可训练）")
         else:
             self.hidden_features = None
             self.class_num_hidden = 0
