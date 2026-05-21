@@ -617,10 +617,12 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         outputs_test = netC_aux(features_classify)
         base_outputs_test = netC(features_classify)
         base_softmax_out = nn.Softmax(dim=1)(base_outputs_test)
-        softmax_out = nn.Softmax(dim=1)(outputs_test)
+        neg_softmax_out = nn.Softmax(dim=1)(outputs_test[:,cfg.class_num:])
+        softmax_out = torch.cat([base_softmax_out,neg_softmax_out],dim=1)
+        #softmax_out = nn.Softmax(dim=1)(outputs_test)
 
         abulations = beta_pre_1 * iter_num / max_iter + beta_pre_2 # 0.1~1.1
-        d = abulations / 10 #0.01~0.1
+        d =(beta_pre_1/20) * iter_num / max_iter + (beta_pre_2/10) #0.01~0.06
         source_score_bank[tar_idx] = (1-d)*source_score_bank[tar_idx] + d*target_score_bank[tar_idx]
         current_batch_scores = source_score_bank[tar_idx]
         avg_score = current_batch_scores.mean().item()
