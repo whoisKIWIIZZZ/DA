@@ -254,37 +254,63 @@ def evaluate_learnable_neg(cfg):
                                 shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
         logger.info(f"S={s_name}: {len(src_loader.dataset)} samples")
 
-        # ===== 训练 neg_embed =====
+        # ===== 训练 neg_embed（反混淆：pos 错 → neg 标记 pos 的错类） =====
+        lambda_anti = 0.5  # 反混淆 loss 权重
         optimizer = torch.optim.Adam([neg_embed], lr=1e-3, weight_decay=1e-4)
         num_epochs = 20
-        logger.info(f"Training on S for {num_epochs} epochs...")
+        logger.info(f"Training on S for {num_epochs} epochs (λ_anti={lambda_anti})...")
+        logger.info(f"  标准 CE:  neg_logits[真类] ↓")
+        logger.info(f"  反混淆:    pos 错时 neg_logits[pos预测错类] ↑")
 
         for epoch in range(num_epochs):
             total_loss = 0
-            correct = 0
+            total_ce = 0
+            total_anti = 0
+            neg_correct = 0
+            pos_correct = 0
             total = 0
+            anti_samples = 0
             for data in src_loader:
                 inputs, labels = data[0].cuda(), data[1].cuda()
                 with torch.no_grad():
                     img_feats = clip_model.encode_image(inputs)
                     img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+                    pos_logits = logit_scale * img_feats @ pos_text.t()
+                    pos_pred = pos_logits.argmax(1)
 
                 neg_embed_norm = neg_embed / neg_embed.norm(dim=-1, keepdim=True)
                 neg_logits = logit_scale * img_feats @ neg_embed_norm.t()
-                loss = nn.CrossEntropyLoss()(-neg_logits, labels)
+
+                # 标准 CE：真类的 neg_logits 应最小
+                loss_ce = nn.CrossEntropyLoss()(-neg_logits, labels)
+
+                # 反混淆：pos 预测错的类，neg 应该给高分（= 不是它）
+                pos_wrong_mask = (pos_pred != labels)
+                if pos_wrong_mask.any():
+                    loss_anti = -neg_logits[pos_wrong_mask].gather(
+                        1, pos_pred[pos_wrong_mask].unsqueeze(1)).mean()
+                    anti_samples += pos_wrong_mask.sum().item()
+                else:
+                    loss_anti = torch.tensor(0.0, device=neg_logits.device)
+
+                loss = loss_ce + lambda_anti * loss_anti
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
                 total_loss += loss.item()
-                _, pred = torch.min(neg_logits, dim=1)
-                correct += (pred == labels).float().sum().item()
+                total_ce += loss_ce.item()
+                total_anti += loss_anti.item() if isinstance(loss_anti, torch.Tensor) and loss_anti.item() != 0 else 0.0
+                neg_correct += (neg_logits.argmin(1) == labels).float().sum().item()
+                pos_correct += (pos_pred == labels).float().sum().item()
                 total += labels.size(0)
 
             if (epoch + 1) % 5 == 0:
-                logger.info(f"  Epoch {epoch+1:3d}: loss={total_loss/len(src_loader):.4f}, "
-                            f"src_neg_acc={correct/total*100:.2f}%")
+                logger.info(f"  Epoch {epoch+1:3d}: loss={total_loss/len(src_loader):.4f} "
+                            f"(CE={total_ce/len(src_loader):.4f} anti={total_anti/max(len(src_loader),1):.4f}) "
+                            f"neg_acc={neg_correct/total*100:.1f}% pos_acc={pos_correct/total*100:.1f}%"
+                            f"  anti_samples={anti_samples/len(src_loader):.0f}/batch")
 
         # 保存模型
         os.makedirs(cfg.output_dir_src, exist_ok=True)
