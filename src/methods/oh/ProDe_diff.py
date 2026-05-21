@@ -323,28 +323,24 @@ def train_target(cfg):
                                            outputs_test_new)
         clip_score = clip_score.float()
 
-        # 负向嵌入：显式 CE 训练（仿 pretrain），然后组合
+        term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
+        term_b = clip_score.cuda()
+        new_clip = term_a + term_b
+
+        # 负向嵌入：显式 CE 训练，不介入 logit 组合
+        neg_logits = None
         if neg_embed is not None:
             with torch.no_grad():
                 img_feats = model.image_encoder(inputs_test_clip.type(model.dtype))
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
             neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
-            term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
-            term_b = clip_score.cuda()
-            new_clip = term_a + term_b - cfg.ProDe.NEG_ALPHA * neg_logits.detach()
-
-            # 显式训练 neg_embed：真类的 neg_logits 应最小
             with torch.no_grad():
                 pseudo_labels = new_clip.argmax(1)
             loss_neg = nn.CrossEntropyLoss()(-neg_logits, pseudo_labels)
             opt_neg.zero_grad()
             loss_neg.backward()
             opt_neg.step()
-        else:
-            term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
-            term_b = clip_score.cuda()
-            new_clip = term_a + term_b
 
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
@@ -372,7 +368,13 @@ def train_target(cfg):
             gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + cfg.ProDe.EPSILON))
             classifier_loss = classifier_loss - 0.1 * gentropy_loss
         pred = clip_index_new
-        entropy_loss = nn.CrossEntropyLoss()(outputs_test, pred)
+        if neg_logits is not None:
+            pred_neg_score = neg_logits.detach().gather(1, pred.unsqueeze(1)).squeeze(1)
+            neg_rank = (neg_logits.detach() > pred_neg_score.unsqueeze(1)).sum(1).float()
+            pseudo_weight = (neg_rank / cfg.class_num).clamp(0.1, 1.0)
+            entropy_loss = (pseudo_weight * nn.CrossEntropyLoss(reduction='none')(outputs_test, pred)).mean()
+        else:
+            entropy_loss = nn.CrossEntropyLoss()(outputs_test, pred)
         classifier_loss =  cfg.ProDe.GENT_PAR*entropy_loss + classifier_loss
 
         optimizer.zero_grad()
