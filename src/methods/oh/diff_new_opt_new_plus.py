@@ -627,9 +627,10 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
         neg_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,cfg.class_num:])
         clip_all_output = torch.cat([base_clip_all_output, neg_clip_all_output], dim=1)
+        clip_final = base_outputs_test+logit_clip_score_include_hidden[:,:cfg.class_num]- 0.5*logit_clip_score_include_hidden[:,cfg.class_num:]
         #clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
-        _, clip_predict = torch.max(logit_clip_score_include_hidden[:,:cfg.class_num]- 0.5*logit_clip_score_include_hidden[:,cfg.class_num:], 1)  # 从test clip来
+        _, clip_predict = torch.max(clip_final, 1)  # 从test clip来
 
         # 负向嵌入显式 CE 训练
         if mypromt.hidden_features is not None and mypromt.class_num_hidden > 0:
