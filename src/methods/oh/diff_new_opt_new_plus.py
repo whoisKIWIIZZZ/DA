@@ -345,6 +345,32 @@ def print_cfg(cfg):
     return s
 
 
+@torch.no_grad()
+def eval_neg_metrics(dset_loaders, mypromt, cfg):
+    """评估负向嵌入：NegAcc 和 mean rank（rank1=真类neg_logits最低）"""
+    all_neg_logits = []
+    all_labels = []
+    for data in dset_loaders["clip_test"]:
+        inputs = data[0]
+        labels = data[1]
+        inputs = inputs.cuda()
+        img_feats = mypromt.clip_model.encode_image(inputs.type(mypromt.clip_model.dtype))
+        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+        hidden_norm = mypromt.hidden_features / mypromt.hidden_features.norm(dim=-1, keepdim=True)
+        neg_logits = mypromt.clip_model.logit_scale.exp() * img_feats @ hidden_norm.t()
+        all_neg_logits.append(neg_logits.cpu())
+        all_labels.append(labels)
+    neg_logits = torch.cat(all_neg_logits)
+    labels = torch.cat(all_labels)
+    neg_pred = neg_logits.argmin(1)
+    neg_acc = (neg_pred == labels).float().mean().item() * 100
+    ranks = neg_logits.argsort(dim=1).argsort(dim=1)
+    true_ranks = ranks.gather(1, labels.unsqueeze(1)).float()
+    rank1 = (true_ranks == 0).float().mean().item() * 100
+    mean_rank = true_ranks.mean().item() + 1  # rank 从 1 开始
+    return {'neg_acc': neg_acc, 'rank1': rank1, 'mean_rank': mean_rank}
+
+
 def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = True,use_clip = True,aux_begin=0.3):
     print("using the new opt file")
     print("iid:{},cls:{},clip:{}".format(use_iid,use_cls,use_clip))
@@ -627,10 +653,15 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
         neg_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,cfg.class_num:])
         clip_all_output = torch.cat([base_clip_all_output, neg_clip_all_output], dim=1)
-        clip_final = base_outputs_test+logit_clip_score_include_hidden[:,:cfg.class_num]- 0.5*logit_clip_score_include_hidden[:,cfg.class_num:]
+        clip_final = logit_clip_score_include_hidden[:,:cfg.class_num]
         #clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
         _, predict = torch.max(score_bank[tar_idx], 1)  # 从bank来的
         _, clip_predict = torch.max(clip_final, 1)  # 从test clip来
+
+        predict_one = np.eye(K)[predict.cpu()]
+        clip_one = np.eye(K)[clip_predict.cpu()]
+        predict_mix = data * predict_one + (1 - data) * clip_one
+        predict_mix = torch.from_numpy(predict_mix).cuda()
 
         # 负向嵌入显式 CE 训练
         if mypromt.hidden_features is not None and mypromt.class_num_hidden > 0:
@@ -639,9 +670,8 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
             hidden_norm = mypromt.hidden_features / mypromt.hidden_features.norm(dim=-1, keepdim=True)
             neg_logits = mypromt.clip_model.logit_scale.exp() * img_feats @ hidden_norm.t()
-            combined = base_clip_all_output - 0.5 * nn.Softmax(dim=1)(neg_logits)
             with torch.no_grad():
-                pseudo_labels = combined.argmax(1)
+                pseudo_labels = predict_mix.argmax(1)
             loss_neg = nn.CrossEntropyLoss()(-neg_logits, pseudo_labels)
             try:
                 opt_neg.zero_grad()
@@ -650,28 +680,13 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                 opt_neg.zero_grad()
             loss_neg.backward()
             opt_neg.step()
-        
-        predict_one = np.eye(K)[predict.cpu()]
-        
-        clip_one = np.eye(K)[clip_predict.cpu()]
-
-        predict_mix = data * predict_one + (1 - data) * clip_one
-        predict_mix = torch.from_numpy(predict_mix).cuda()
 
 
         if cfg.DIFF_ALIGN.CLS_PAR > 0 and use_cls == True:
             targets = predict_mix[indices_greater]
             outputs_log_softmax = base_outputs_test[indices_greater]
             pseudo_label_loss = (- targets * outputs_log_softmax).sum(dim=1).mean()
-            # if cfg.SETTING.DATASET == 'VISDA-C':
-            #     if iter_num < 3000:
-            #         cls_par = 0.25
-            #     elif iter_num< 6000:
-            #         cls_par = 0.3
-            #     else:
-            #         cls_par = 0.4
-            # else:
-            #     cls_par = 0.4
+
             classifier_loss = pseudo_label_loss * 0.4
         else:
             classifier_loss = torch.tensor(0.0).cuda()
@@ -751,7 +766,10 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
                 acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
-                neg_str = f' neg={loss_neg.item():.4f}' if mypromt.hidden_features is not None else ''
+                neg_str = ''
+                if mypromt.hidden_features is not None:
+                    nm = eval_neg_metrics(dset_loaders, mypromt, cfg)
+                    neg_str = f' neg_loss={loss_neg.item():.4f} NegAcc={nm["neg_acc"]:.1f}% Rank1={nm["rank1"]:.1f}% meanR={nm["mean_rank"]:.1f}'
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}{}'.format(cfg.name, iter_num, max_iter,
                                                                                      acc_s_te,acc_s_te_aux,
                                                                                      total_loss, neg_str)
