@@ -515,8 +515,9 @@ def train_target(cfg):
 
         # 负向嵌入：显式 CE 训练（仿 pretrain），然后组合
         if neg_embed is not None:
-            img_feats = model.image_encoder(inputs_test_clip.type(model.dtype))
-            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            with torch.no_grad():
+                img_feats = model.image_encoder(inputs_test_clip.type(model.dtype))
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
             neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
             term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
