@@ -428,6 +428,25 @@ def evaluate_learnable_neg(cfg):
         both_wrong = pos_wrong & (neg_pred == labels)
         logger.info(f"pos错且neg也错(neg把真类排到最低)={both_wrong.float().sum().item()}个 "
                     f"({both_wrong.float().mean()*100:.1f}%)")
+
+        # ===== 动态 alpha 可行性分析：alpha 能否区分 neg 有帮助/有害的样本？ =====
+        pos_right = pos_correct
+        logger.info(f"--- 动态 alpha 分析 T={t_name} ---")
+        logger.info(f"{'alpha':>6s} {'wrong→acc':>10s} {'right→acc':>10s} {'all→acc':>9s} {'gap':>8s}")
+        logger.info("-" * 50)
+        best_gap = -999
+        best_alpha = 0.0
+        for alpha_val in torch.linspace(0, 2.0, 21):
+            combined = pos_logits - alpha_val.item() * neg_logits
+            acc_wrong = (combined[pos_wrong].argmax(1) == labels[pos_wrong]).float().mean().item() * 100
+            acc_right = (combined[pos_right].argmax(1) == labels[pos_right]).float().mean().item() * 100
+            acc_all = (combined.argmax(1) == labels).float().mean().item() * 100
+            gap = acc_wrong - acc_right
+            logger.info(f"{alpha_val.item():6.2f} {acc_wrong:9.1f}% {acc_right:9.1f}% {acc_all:8.1f}% {gap:+7.1f}%")
+            if gap > best_gap:
+                best_gap = gap
+                best_alpha = alpha_val.item()
+        logger.info(f"→ 最佳动态窗口: alpha={best_alpha:.2f} (wrong-right gap={best_gap:+.1f}%)")
         logger.info("-" * 60)
 
         all_results[t_name] = {
