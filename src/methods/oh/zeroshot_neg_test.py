@@ -3,6 +3,7 @@ import os.path as osp
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import clip
 import logging
 from torch.utils.data import DataLoader
@@ -255,12 +256,13 @@ def evaluate_learnable_neg(cfg):
         logger.info(f"S={s_name}: {len(src_loader.dataset)} samples")
 
         # ===== 训练 neg_embed（反混淆：pos 错 → neg 标记 pos 的错类） =====
-        lambda_anti = 0.5  # 反混淆 loss 权重
+        lambda_anti = 1.0  # 反混淆 loss 权重
+        anti_margin = 5.0  # hinge margin：neg_logits[错类] 比 neg_logits[真类] 高多少即可
         optimizer = torch.optim.Adam([neg_embed], lr=1e-3, weight_decay=1e-4)
         num_epochs = 20
-        logger.info(f"Training on S for {num_epochs} epochs (λ_anti={lambda_anti})...")
+        logger.info(f"Training on S for {num_epochs} epochs (λ_anti={lambda_anti}, margin={anti_margin})...")
         logger.info(f"  标准 CE:  neg_logits[真类] ↓")
-        logger.info(f"  反混淆:    pos 错时 neg_logits[pos预测错类] ↑")
+        logger.info(f"  反混淆 hinge:  pos 错时 neg_logits[错类] > neg_logits[真类] + {anti_margin}")
 
         for epoch in range(num_epochs):
             total_loss = 0
@@ -284,11 +286,15 @@ def evaluate_learnable_neg(cfg):
                 # 标准 CE：真类的 neg_logits 应最小
                 loss_ce = nn.CrossEntropyLoss()(-neg_logits, labels)
 
-                # 反混淆：pos 预测错的类，neg 应该给高分（= 不是它）
+                # 反混淆 hinge：pos 预测错的类 j，neg 应该给高分
+                #   neg_logits[j] > neg_logits[真类] + margin 即可，避免发散
                 pos_wrong_mask = (pos_pred != labels)
                 if pos_wrong_mask.any():
-                    loss_anti = -neg_logits[pos_wrong_mask].gather(
-                        1, pos_pred[pos_wrong_mask].unsqueeze(1)).mean()
+                    neg_wrong = neg_logits[pos_wrong_mask].gather(
+                        1, pos_pred[pos_wrong_mask].unsqueeze(1)).squeeze(1)
+                    neg_true = neg_logits[pos_wrong_mask].gather(
+                        1, labels[pos_wrong_mask].unsqueeze(1)).squeeze(1)
+                    loss_anti = F.relu(anti_margin - (neg_wrong - neg_true)).mean()
                     anti_samples += pos_wrong_mask.sum().item()
                 else:
                     loss_anti = torch.tensor(0.0, device=neg_logits.device)
