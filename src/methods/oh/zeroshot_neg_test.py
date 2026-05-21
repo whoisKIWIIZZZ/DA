@@ -461,6 +461,24 @@ def evaluate_learnable_neg(cfg):
         logger.info(f"pos错且neg也错(neg把真类排到最低)={both_wrong.float().sum().item()}个 "
                     f"({both_wrong.float().mean()*100:.1f}%)")
 
+        # ===== 排序相关性：neg 是否提供独立于 pos 的信息？ =====
+        from scipy.stats import spearmanr
+        pos_np = pos_logits.cpu().numpy()
+        neg_np = neg_logits.cpu().numpy()
+        spearman_per_sample = []
+        for i in range(pos_np.shape[0]):
+            r, _ = spearmanr(pos_np[i], neg_np[i])
+            spearman_per_sample.append(r)
+        spearman_per_sample = np.array(spearman_per_sample)
+        logger.info(f"pos-neg Spearman 相关系数: mean={spearman_per_sample.mean():.4f} "
+                    f"median={np.median(spearman_per_sample):.4f} "
+                    f"std={spearman_per_sample.std():.4f}")
+        # 在 pos 错误样本上的相关性
+        if pos_wrong.sum() > 0:
+            sp_wrong = spearman_per_sample[pos_wrong.cpu().numpy()]
+            logger.info(f"  pos错误样本上: mean={sp_wrong.mean():.4f} median={np.median(sp_wrong):.4f} "
+                        f"(越低越独立)")
+
         # ===== 动态 alpha 可行性分析：alpha 能否区分 neg 有帮助/有害的样本？ =====
         pos_right = pos_correct
         logger.info(f"--- 动态 alpha 分析 T={t_name} ---")
