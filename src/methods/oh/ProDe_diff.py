@@ -168,7 +168,7 @@ def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
         text_feats = model.get_text_features()
 
         pos_logits = model.logit_scale.exp() * img_feats @ text_feats.t()
-        neg_logits = model.logit_scale.exp() * img_feats @ neg_embed
+        neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
         all_pos_logits.append(pos_logits.cpu())
         all_neg_logits.append(neg_logits.cpu())
@@ -517,7 +517,7 @@ def train_target(cfg):
         if neg_embed is not None:
             img_feats = model.image_encoder(inputs_test_clip.type(model.dtype))
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-            neg_logits = model.logit_scale.exp() * img_feats @ neg_embed
+            neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
             term_a = outputs_test_new - logtis_bank[tar_idx].cuda()
             term_b = clip_score.cuda()
