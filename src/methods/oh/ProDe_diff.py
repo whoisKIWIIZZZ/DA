@@ -182,8 +182,7 @@ def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
         text_feats = model.get_text_features()
 
         pos_logits = model.logit_scale.exp() * img_feats @ text_feats.t()
-        neg_embed_norm = neg_embed / neg_embed.norm(dim=-1, keepdim=True)
-        neg_logits = model.logit_scale.exp() * img_feats @ neg_embed_norm.t()
+        neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
         all_pos_logits.append(pos_logits.cpu())
         all_neg_logits.append(neg_logits.cpu())
@@ -377,11 +376,10 @@ def train_target(cfg):
         # 负向嵌入：介入 logit 组合 + CE 自训练
         neg_logits = None
         if neg_embed is not None:
-            neg_embed_norm = neg_embed / neg_embed.norm(dim=-1, keepdim=True)
             with torch.no_grad():
                 img_feats = model.image_encoder(inputs_test_clip.type(model.dtype))
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-            neg_logits = model.logit_scale.exp() * img_feats @ neg_embed_norm.t()
+            neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
             # 介入 logit 组合（detach 避免与 loss_neg 的 backward 冲突）
             pred_before = new_clip.argmax(1)
@@ -488,8 +486,7 @@ def train_target(cfg):
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
             text_feats = model.get_text_features()
             all_pos.append((model.logit_scale.exp() * img_feats @ text_feats.t()).cpu())
-            neg_norm = neg_embed / neg_embed.norm(dim=-1, keepdim=True)
-            all_neg.append((model.logit_scale.exp() * img_feats @ neg_norm.t()).cpu())
+            all_neg.append((model.logit_scale.exp() * img_feats @ neg_embed.t()).cpu())
             all_lbl.append(labels)
         pos = torch.cat(all_pos)
         neg = torch.cat(all_neg)
