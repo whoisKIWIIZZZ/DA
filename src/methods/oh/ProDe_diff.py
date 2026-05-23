@@ -275,8 +275,9 @@ def train_target(cfg):
         else:
             logger.info(f"Learned neg_embed not found: {neg_path}, skipping")
 
-    # --- netC_proxy: N+N classifier for IID loss ---
-    netC_proxy = network.feat_classifier(type='wn', class_num=cfg.class_num * 2, bottleneck_dim=cfg.bottleneck).cuda()
+    # --- netC_proxy: 过聚类头（IIC 论文原版） ---
+    netC_proxy = network.feat_classifier(type='wn', class_num=cfg.class_num * cfg.ProDe.OVER_FACTOR,
+                                          bottleneck_dim=cfg.bottleneck).cuda()
     with torch.no_grad():
         netC_proxy.fc.weight_g.data[:cfg.class_num].copy_(netC.fc.weight_g.data)
         netC_proxy.fc.weight_v.data[:cfg.class_num].copy_(netC.fc.weight_v.data)
