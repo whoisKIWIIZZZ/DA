@@ -358,8 +358,8 @@ def train_target(cfg):
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
             neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
-            # 介入 logit 组合
-            new_clip = new_clip - cfg.ProDe.NEG_ALPHA * neg_logits
+            # 介入 logit 组合（detach 避免与 loss_neg 的 backward 冲突）
+            new_clip = new_clip - cfg.ProDe.NEG_ALPHA * neg_logits.detach()
 
             # CE 自训练
             with torch.no_grad():
