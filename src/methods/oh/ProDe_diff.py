@@ -160,7 +160,7 @@ def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
     all_labels = []
 
     for data in dset_loaders["test"]:
-        inputs = data[0][0].cuda()
+        inputs = data[0][1].cuda()  # CLIP 归一化（rf_1），不是 ImageNet 归一化（data[0][0]）
         labels = data[1]
 
         img_feats = model.image_encoder(inputs.type(model.dtype))
@@ -442,10 +442,9 @@ def train_target(cfg):
 
     # ===== 最终诊断：adapted-pos vs neg 独立性 =====
     if neg_embed is not None:
-        from scipy.stats import spearmanr
         all_pos, all_neg, all_lbl = [], [], []
         for data in dset_loaders["test"]:
-            inputs = data[0][0].cuda()
+            inputs = data[0][1].cuda()  # CLIP 归一化
             labels = data[1]
             img_feats = model.image_encoder(inputs.type(model.dtype))
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
