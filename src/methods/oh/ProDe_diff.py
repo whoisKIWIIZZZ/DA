@@ -350,7 +350,7 @@ def train_target(cfg):
         term_b = clip_score.cuda()
         new_clip = term_a + term_b
 
-        # 负向嵌入：显式 CE 训练，不介入 logit 组合
+        # 负向嵌入：介入 logit 组合 + CE 自训练
         neg_logits = None
         if neg_embed is not None:
             with torch.no_grad():
@@ -358,6 +358,10 @@ def train_target(cfg):
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
             neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
+            # 介入 logit 组合
+            new_clip = new_clip - cfg.ProDe.NEG_ALPHA * neg_logits
+
+            # CE 自训练
             with torch.no_grad():
                 pseudo_labels = new_clip.argmax(1)
             loss_neg = nn.CrossEntropyLoss()(-neg_logits, pseudo_labels)
