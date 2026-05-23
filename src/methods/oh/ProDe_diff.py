@@ -45,7 +45,8 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
-    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
+    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train(),
+                                                  over_transform=image_train_over())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
@@ -71,6 +72,19 @@ def image_train(resize_size=256, crop_size=224, alexnet=False):
         transforms.Resize((resize_size, resize_size)),
         transforms.RandomCrop(crop_size),
         transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize
+    ])
+
+def image_train_over(resize_size=256, crop_size=224):
+    """IIC 论文增强：随机裁剪 + 水平翻转 + 颜色抖动 + ImageNet 归一化"""
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    return transforms.Compose([
+        transforms.Resize((resize_size, resize_size)),
+        transforms.RandomCrop(crop_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
         transforms.ToTensor(),
         normalize
     ])
@@ -322,10 +336,18 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            data_tuple, _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            data_tuple, _, tar_idx = next(iter_test)
+
+        if len(data_tuple) == 3:
+            inputs_test, inputs_test_augs, inputs_test_over = data_tuple
+            inputs_test_over = inputs_test_over.cuda()
+        else:
+            inputs_test, inputs_test_augs = data_tuple
+            inputs_test_over = None
+
         if inputs_test.size(0) == 1:
             continue
 
@@ -382,17 +404,18 @@ def train_target(cfg):
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
         _, clip_index_new = torch.max(new_clip, 1)
 
-        # N+N IID loss with temperature-controlled proxy
-        outputs_proxy2N = netC_proxy(features_test)
-        softmax_out_2N = nn.Softmax(dim=1)(outputs_proxy2N)
-        # with torch.no_grad():
-        #     T_proxy = cfg.ProDe.PROXY_WEIGHT + 1.0  # ~2.0, larger = less proxy influence
-        #     clip_logits_2N = torch.cat([new_clip, residual], dim=1)
-        #     clip_softmax_2N = nn.Softmax(dim=1)(clip_logits_2N)
-        # iic_loss, _ = IID_losses.IID_loss(cfg.class_num, softmax_out_2N, clip_softmax_2N,
-        #                                   w_base=1.0, w_aux=0.3, bn=-0.3, lamb=1.0)
-        iic_loss = IID_losses.IID_loss_old(softmax_out,clip_score_sm)
-        classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
+        # 主头 IIC：ResNet(C) vs CLIP(C)
+        iic_main = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
+        classifier_loss = cfg.ProDe.IIC_PAR * iic_main
+
+        # 过聚类头 IIC（IIC 论文原版）：同一张图两个增强 → ResNet(2C) 互信息最大化
+        if inputs_test_over is not None:
+            feat_over = netB(netF(inputs_test_over))
+            iic_over = IID_losses.IID_loss_old(
+                nn.Softmax(dim=1)(netC_proxy(features_test)),
+                nn.Softmax(dim=1)(netC_proxy(feat_over))
+            )
+            classifier_loss = classifier_loss + cfg.ProDe.OVER_LAMBDA * iic_over
         msoftmax = softmax_out.mean(dim=0)
 
         if  cfg.SETTING.DATASET=='office':

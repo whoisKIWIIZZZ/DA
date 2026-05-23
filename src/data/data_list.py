@@ -177,13 +177,14 @@ class ImageList_idx_aug_fix(Dataset):
     
                 #origin
 class ImageList_idx_aug_fix_old(Dataset):
-    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB'):
+    def __init__(self, image_list, labels=None, transform=None, target_transform=None,
+                 mode='RGB', over_transform=None):
         self.committee_size = 1
-        resize_size = 256 
-        crop_size = 224 
+        resize_size = 256
+        crop_size = 224
         normalize = transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
                                     std=[0.26862954, 0.26130258, 0.27577711])
-                                
+
         self.rf_1 = transforms.Compose([
                 transforms.Resize(crop_size, interpolation=Image.BICUBIC),
                 transforms.CenterCrop(crop_size),
@@ -194,6 +195,7 @@ class ImageList_idx_aug_fix_old(Dataset):
         self.imgs = imgs
         self.transform = transform
         self.target_transform = target_transform
+        self.over_transform = over_transform
         if mode == 'RGB':
             self.loader = rgb_loader
         elif mode == 'L':
@@ -205,13 +207,18 @@ class ImageList_idx_aug_fix_old(Dataset):
 
         if self.transform is not None:
             data = self.transform(img)
-        
+
         if self.target_transform is not None:
             target = self.target_transform(target)
 
         img_1 = self.rf_1(img)
         re_ls = img_1
+
+        if self.over_transform is not None:
+            data_over = self.over_transform(img)
+            return (data, re_ls, data_over), target, index
         return (data, re_ls), target, index
+
     def __len__(self):
         return len(self.imgs)
 
