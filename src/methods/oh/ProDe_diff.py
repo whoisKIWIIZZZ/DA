@@ -359,7 +359,16 @@ def train_target(cfg):
             neg_logits = model.logit_scale.exp() * img_feats @ neg_embed.t()
 
             # 介入 logit 组合（detach 避免与 loss_neg 的 backward 冲突）
+            if iter_num == 1:
+                pred_before = new_clip.argmax(1)
             new_clip = new_clip - cfg.ProDe.NEG_ALPHA * neg_logits.detach()
+            if iter_num == 1:
+                pred_after = new_clip.argmax(1)
+                n_changed = (pred_before != pred_after).sum().item()
+                logger.info(f"[诊断] neg干预伪标签: {n_changed}/{pred_before.size(0)}个样本改变 "
+                            f"({n_changed/pred_before.size(0)*100:.1f}%) "
+                            f"| term_a: {term_a.abs().mean():.1f} term_b: {term_b.abs().mean():.1f} "
+                            f"neg*α: {(cfg.ProDe.NEG_ALPHA * neg_logits.detach()).abs().mean():.1f}")
 
             # CE 自训练
             with torch.no_grad():
