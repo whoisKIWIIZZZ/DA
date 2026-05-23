@@ -11,6 +11,7 @@ from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
 from sklearn.metrics import confusion_matrix
+from scipy.stats import spearmanr
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
@@ -152,9 +153,8 @@ def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_outpu
     return output
 
 @torch.no_grad()
-@torch.no_grad()
 def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
-    """评估负向嵌入在测试集上的表现"""
+    """评估负向嵌入在测试集上的表现 + pos-neg 独立性诊断"""
     all_pos_logits = []
     all_neg_logits = []
     all_labels = []
@@ -177,11 +177,11 @@ def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
     pos_logits = torch.cat(all_pos_logits)
     neg_logits = torch.cat(all_neg_logits)
     labels = torch.cat(all_labels)
-    C = neg_logits.shape[1]
 
     pos_pred = pos_logits.argmax(1)
-    pos_acc = (pos_pred == labels).float().mean().item() * 100
-    pos_wrong = ~(pos_pred == labels)
+    pos_correct = (pos_pred == labels)
+    pos_wrong = ~pos_correct
+    pos_acc = pos_correct.float().mean().item() * 100
 
     neg_pred = neg_logits.argmin(1)
     neg_acc = (neg_pred == labels).float().mean().item() * 100
@@ -198,8 +198,31 @@ def eval_neg_metrics(dset_loaders, model, neg_embed, neg_alpha):
     nfix = (pos_wrong & (neg_pred == labels)).float().sum().item() / max(pos_wrong.sum().item(), 1) * 100
     cfix = (pos_wrong & (comb_pred == labels)).float().sum().item() / max(pos_wrong.sum().item(), 1) * 100
 
-    return {'pos_acc': pos_acc, 'neg_acc': neg_acc, 'comb_acc': comb_acc,
-            'rank1': rank1, 'mean_rank': mean_rank, 'neg_fix': nfix, 'comb_fix': cfix}
+    # ===== pos-neg 排序独立性 =====
+    pos_np = pos_logits.numpy()
+    neg_np = neg_logits.numpy()
+    sp = np.array([spearmanr(pos_np[i], neg_np[i])[0] for i in range(pos_np.shape[0])])
+    sp_mean = sp.mean()
+
+    result = {
+        'pos_acc': pos_acc, 'neg_acc': neg_acc, 'comb_acc': comb_acc,
+        'rank1': rank1, 'mean_rank': mean_rank, 'neg_fix': nfix, 'comb_fix': cfix,
+        'spearman': sp_mean,
+    }
+
+    # pos 错误样本上的 Spearman + neg 修复率
+    if pos_wrong.sum() > 0:
+        sp_wrong = sp[pos_wrong.numpy()].mean()
+        result['sp_wrong'] = sp_wrong
+        # 多 alpha 修复率
+        nfixes = []
+        for a in [0.1, 0.3, 0.5, 1.0]:
+            c = (pos_logits - a * neg_logits).argmax(1)
+            nf = (pos_wrong & (c == labels)).sum().item() / pos_wrong.sum().item() * 100
+            nfixes.append(nf)
+        result['nfix_alphas'] = nfixes
+
+    return result
 
 
 def train_target(cfg):
@@ -400,7 +423,12 @@ def train_target(cfg):
             # 负向嵌入评估
             if neg_embed is not None:
                 nm = eval_neg_metrics(dset_loaders, model, neg_embed, cfg.ProDe.NEG_ALPHA)
-                log_str += '\n  NegEval: PosAcc={pos_acc:.1f}% NegAcc={neg_acc:.1f}% CombAcc={comb_acc:.1f}% Rank1={rank1:.1f}% meanR={mean_rank:.1f} NFix={neg_fix:.1f}% CFix={comb_fix:.1f}%'.format(**nm)
+                log_str += '\n  NegEval: PosAcc={pos_acc:.1f}% NegAcc={neg_acc:.1f}% CombAcc={comb_acc:.1f}% Rank1={rank1:.1f}% meanR={mean_rank:.1f}% NFix={neg_fix:.1f}% CFix={comb_fix:.1f}% Spearman={spearman:.3f}'.format(**nm)
+                if 'sp_wrong' in nm:
+                    log_str += ' SpWrong={sp_wrong:.3f}'.format(**nm)
+                if 'nfix_alphas' in nm:
+                    nfs = ' '.join([f'α{a:.1f}={v:.1f}%' for a, v in zip([0.1, 0.3, 0.5, 1.0], nm['nfix_alphas'])])
+                    log_str += ' | ' + nfs
 
             logger.info(log_str)
             netF.train()
@@ -411,6 +439,42 @@ def train_target(cfg):
         torch.save(netF.state_dict(), osp.join(cfg.output_dir, "target_F_" + cfg.savename + ".pt"))
         torch.save(netB.state_dict(), osp.join(cfg.output_dir, "target_B_" + cfg.savename + ".pt"))
         torch.save(netC.state_dict(), osp.join(cfg.output_dir, "target_C_" + cfg.savename + ".pt"))
+
+    # ===== 最终诊断：adapted-pos vs neg 独立性 =====
+    if neg_embed is not None:
+        from scipy.stats import spearmanr
+        all_pos, all_neg, all_lbl = [], [], []
+        for data in dset_loaders["test"]:
+            inputs = data[0][0].cuda()
+            labels = data[1]
+            img_feats = model.image_encoder(inputs.type(model.dtype))
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            text_feats = model.get_text_features()
+            all_pos.append((model.logit_scale.exp() * img_feats @ text_feats.t()).cpu())
+            all_neg.append((model.logit_scale.exp() * img_feats @ neg_embed.t()).cpu())
+            all_lbl.append(labels)
+        pos = torch.cat(all_pos)
+        neg = torch.cat(all_neg)
+        lbl = torch.cat(all_lbl)
+
+        pos_pred = pos.argmax(1)
+        pos_acc = (pos_pred == lbl).float().mean().item() * 100
+        pos_wrong = ~(pos_pred == lbl)
+
+        sp = np.array([spearmanr(pos[i].numpy(), neg[i].numpy())[0] for i in range(pos.shape[0])])
+        logger.info("=" * 60)
+        logger.info(f"最终诊断: adapted-pos vs neg 独立性")
+        logger.info(f"  adapted-PosAcc={pos_acc:.1f}%")
+        logger.info(f"  pos-neg Spearman: mean={sp.mean():.4f} median={np.median(sp):.4f}")
+        if pos_wrong.sum() > 0:
+            logger.info(f"  pos错误样本 Spearman: mean={sp[pos_wrong.numpy()].mean():.4f}")
+
+        for alpha in [0.1, 0.3, 0.5, 1.0]:
+            comb_acc = (pos - alpha * neg).argmax(1).eq(lbl).float().mean().item() * 100
+            nfix = (pos_wrong & ((pos - alpha * neg).argmax(1) == lbl)).sum().item()
+            nfix_rate = nfix / max(pos_wrong.sum().item(), 1) * 100
+            logger.info(f"  α={alpha:.1f}: CombAcc={comb_acc:.1f}% neg修复={nfix}/{pos_wrong.sum().item()}={nfix_rate:.1f}%")
+        logger.info("=" * 60)
 
     return netF, netB, netC
 
