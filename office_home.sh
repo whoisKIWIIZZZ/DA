@@ -7,6 +7,9 @@ echo DATASET: $DATASET
 echo METHOD: $METHOD
 echo BRIDGE_MODE: $BRIDGE_MODE
 
+# 域索引→缩写映射 (Art/Clipart/Product/RealWorld → A/C/P/R)
+domain_abbr=(A C P R)
+PYTHON=/data/home/scv8780/.conda/envs/sfa/bin/python
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
@@ -19,14 +22,25 @@ for s in ${s_list[*]}; do
         then
         continue
     fi
+        S_LETTER=${domain_abbr[$s]}
+        T_LETTER=${domain_abbr[$t]}
+
         if $BRIDGE_MODE; then
-            CUDA_VISIBLE_DEVICES=0 /data/home/scv8780/.conda/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
+            CUDA_VISIBLE_DEVICES=0 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
                 SETTING.S "$s" SETTING.T "$t" \
                 BRIDGE.ENABLE True &
         else
-            CUDA_VISIBLE_DEVICES=0 /data/home/scv8780/.conda/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
+            CUDA_VISIBLE_DEVICES=0 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
                 SETTING.S "$s" SETTING.T "$t" &
         fi
         wait
+
+        # 训练结束后自动运行bridge分析
+        if $BRIDGE_MODE; then
+            BRIDGE_DIR="output_Models/uda/${DATASET}/${S_LETTER}${T_LETTER}/${METHOD}/bridge_ckpts"
+            echo "========== Bridge 分析: ${S_LETTER}→${T_LETTER} =========="
+            $PYTHON tools/analyze_crossover.py "$BRIDGE_DIR"
+            echo "========== 分析完成，结果在 ${BRIDGE_DIR}/analysis/ =========="
+        fi
     done
 done

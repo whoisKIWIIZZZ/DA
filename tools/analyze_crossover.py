@@ -15,7 +15,7 @@ Bridge 实验事后分析脚本 —— 定理 A 机制验证
     - report.json                  数值报告
 """
 
-import os, sys, glob, json, argparse
+import os, glob, json, argparse
 import numpy as np
 import torch
 import matplotlib
@@ -84,11 +84,14 @@ def set_final_Z(all_ckpts):
 # ==============================================================================
 
 def load_all_checkpoints(bridge_dir):
-    """加载所有 bridge_*.pt 文件，按 iter 排序"""
+    """加载所有 bridge_*.pt 文件，按 iter 排序；无文件返回 None"""
+    if not os.path.isdir(bridge_dir):
+        print(f"警告: 目录不存在: {bridge_dir}，跳过分析")
+        return None
     files = sorted(glob.glob(os.path.join(bridge_dir, 'bridge_*.pt')))
     if not files:
-        print(f"错误: {bridge_dir} 中未找到 bridge checkpoint")
-        sys.exit(1)
+        print(f"警告: {bridge_dir} 中未找到 bridge checkpoint，跳过分析")
+        return None
 
     ckpts = []
     for f in files:
@@ -374,6 +377,8 @@ def main():
 
     # 加载
     ckpts = load_all_checkpoints(bridge_dir)
+    if ckpts is None:
+        return  # 目录不存在或无checkpoint，静默退出
 
     # 报告容器
     report = {
