@@ -283,6 +283,14 @@ _C.DIFF_ALIGN.NUM_SUBCLASS = 5
 _C.DIFF_ALIGN.NUM_CLASS_HIDDEN = 10
 _C.DIFF_ALIGN.USE_NEG = True
 _C.DIFF_ALIGN.LENT_PAR = 0.05
+_C.DIFF_ALIGN.MERGE_ADAPTIVE = False  # True=自适应融合, False=固定scale=0.1(同difo_plus)
+
+# --------------------------------- BRIDGE options ----------------------------- #
+_C.BRIDGE = CfgNode()
+_C.BRIDGE.ENABLE = False              # 是否启用bridge实验checkpoint保存
+_C.BRIDGE.CP_INTERVAL = 1             # 每隔N个interval保存一次checkpoint
+_C.BRIDGE.SAVE_DIR = 'bridge_ckpts'   # checkpoint子目录名
+
 # --------------------------------- ProDe options ----------------------------- #
 _C.ProDe = CfgNode()
 

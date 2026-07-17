@@ -638,10 +638,8 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         ln_sam = softmax_out.shape[0]
         # data = basedata[0:ln_sam]
 
-        if is_merge_stratg_use:
-
-            
-            data = np.random.exponential(scale=abulations, size=ln_sam)  # 0.5
+        if getattr(cfg.DIFF_ALIGN, 'MERGE_ADAPTIVE', True):
+            data = np.random.exponential(scale=abulations, size=ln_sam)
             data[data > 1] = 1
         else:
             data = np.random.exponential(scale=0.1, size=ln_sam)
@@ -781,6 +779,13 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
              #   wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
                     
             logger.info(log_str)
+
+            # Bridge 实验：保存预测矩阵供事后机制分析
+            if getattr(cfg.BRIDGE, 'ENABLE', False) and iter_num % (interval_iter * getattr(cfg.BRIDGE, 'CP_INTERVAL', 1)) == 0:
+                save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
+                                       clip_model, text_features, text_inputs, mypromt,
+                                       iter_num, epoch_num)
+
             netF.train()
             netB.train()
     from datetime import datetime
@@ -819,6 +824,71 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         )
 
     return netF, netB, netC
+
+
+def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
+                           clip_model, text_features, text_inputs, mypromt,
+                           iter_num, epoch_num):
+    """保存 bridge 分析所需预测矩阵——事后用标签做机制验证，训练时不使用标签"""
+    save_dir = osp.join(cfg.output_dir, getattr(cfg.BRIDGE, 'SAVE_DIR', 'bridge_ckpts'))
+    os.makedirs(save_dir, exist_ok=True)
+
+    netF_eval = netF.training
+    netB_eval = netB.training
+    if netF_eval:
+        netF.eval()
+    if netB_eval:
+        netB.eval()
+    netC.eval()
+
+    all_P_c = []
+    all_P_tgt = []
+    all_labels = []
+
+    with torch.no_grad():
+        for data in dset_loaders["clip_test"]:
+            inputs, inputs_clip, labels = data[0][0], data[0][1], data[1]
+            inputs, inputs_clip = inputs.cuda(), inputs_clip.cuda()
+
+            feats = netB(netF(inputs))
+            logits_c = netC(feats)[:, :cfg.class_num]
+            P_c = nn.Softmax(dim=1)(logits_c)
+
+            _, txt_feat = mypromt(inputs_clip)
+            logits_clip = clip_text(clip_model, txt_feat, inputs_clip)
+            P_tgt = nn.Softmax(dim=1)(logits_clip[:, :cfg.class_num])
+
+            all_P_c.append(P_c.cpu())
+            all_P_tgt.append(P_tgt.cpu())
+            all_labels.append(labels)
+
+    P_c = torch.cat(all_P_c, dim=0)
+    P_tgt = torch.cat(all_P_tgt, dim=0)
+    Y = torch.cat(all_labels, dim=0)
+
+    Y_onehot = torch.zeros_like(P_c).scatter(1, Y.long().unsqueeze(1), 1)
+    brier_c = ((Y_onehot - P_c) ** 2).mean().item()
+    brier_tgt = ((Y_onehot - P_tgt) ** 2).mean().item()
+    G_norm_sq = ((P_tgt - P_c) ** 2).mean().item()
+
+    ckpt = {
+        'iter': iter_num,
+        'epoch': epoch_num,
+        'P_c': P_c,
+        'P_tgt': P_tgt,
+        'labels': Y,
+        'brier_c': brier_c,
+        'brier_tgt': brier_tgt,
+        'G_norm_sq': G_norm_sq,
+    }
+    ckpt_path = osp.join(save_dir, f'bridge_{iter_num:06d}.pt')
+    torch.save(ckpt, ckpt_path)
+    logger.info(f'Bridge ckpt saved: {ckpt_path}')
+
+    if netF_eval:
+        netF.train()
+    if netB_eval:
+        netB.train()
 
 
 def print_cfg(cfg):
