@@ -290,6 +290,8 @@ _C.BRIDGE = CfgNode()
 _C.BRIDGE.ENABLE = False              # 是否启用bridge实验checkpoint保存
 _C.BRIDGE.CP_INTERVAL = 1             # 每隔N个interval保存一次checkpoint
 _C.BRIDGE.SAVE_DIR = 'bridge_ckpts'   # checkpoint子目录名
+_C.BRIDGE.SAVE_MODEL = True           # 是否同时保存模型权重(供NTK分析)
+_C.BRIDGE.NTK_SAMPLES = 10            # NTK计算每类采样数
 
 # --------------------------------- ProDe options ----------------------------- #
 _C.ProDe = CfgNode()

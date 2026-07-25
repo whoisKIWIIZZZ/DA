@@ -35,12 +35,18 @@ for s in ${s_list[*]}; do
         fi
         wait
 
-        # 训练结束后自动运行bridge分析
+        # 训练结束 → 自动运行 bridge 分析
         if $BRIDGE_MODE; then
             BRIDGE_DIR="output_Models/uda/${DATASET}/${S_LETTER}${T_LETTER}/${METHOD}/bridge_ckpts"
             echo "========== Bridge 分析: ${S_LETTER}→${T_LETTER} =========="
+
+            echo "--- Layer 0-1: 几何恒等式 + 模态分解 ---"
             $PYTHON tools/analyze_crossover.py "$BRIDGE_DIR"
-            echo "========== 分析完成，结果在 ${BRIDGE_DIR}/analysis/ =========="
+
+            echo "--- Layer 2: NTK 共识算子 + 信任半径 ---"
+            $PYTHON tools/analyze_ntk.py "$BRIDGE_DIR"
+
+            echo "========== 分析完成 =========="
         fi
     done
 done

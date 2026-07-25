@@ -10,7 +10,7 @@ import pandas as pd
 
 from src.models import network
 from torch.utils.data import DataLoader
-from src.data.data_list import ImageList_idx, ImageList_idx_aug_fix_old
+from src.data.data_list import ImageList_idx_aug_fix_old
 from sklearn.metrics import confusion_matrix
 import clip
 from src.utils.utils import *
@@ -121,7 +121,7 @@ def data_load(cfg,preprocess):
     dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs * 3, shuffle=False,
                                       num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["clip_test"] = ImageList_idx(txt_test, transform=image_test_50())
+    dsets["clip_test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["clip_test"] = DataLoader(dsets["clip_test"], batch_size=train_bs * 3, shuffle=False,num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
@@ -351,7 +351,7 @@ def eval_neg_metrics(dset_loaders, mypromt, cfg):
     all_neg_logits = []
     all_labels = []
     for data in dset_loaders["clip_test"]:
-        inputs = data[0]
+        inputs = data[0][1]
         labels = data[1]
         inputs = inputs.cuda()
         img_feats = mypromt.clip_model.encode_image(inputs.type(mypromt.clip_model.dtype))
@@ -844,6 +844,8 @@ def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
     all_P_c = []
     all_P_tgt = []
     all_labels = []
+    all_inputs = []
+    all_inputs_clip = []
 
     with torch.no_grad():
         for data in dset_loaders["clip_test"]:
@@ -861,10 +863,14 @@ def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
             all_P_c.append(P_c.cpu())
             all_P_tgt.append(P_tgt.cpu())
             all_labels.append(labels)
+            all_inputs.append(inputs.cpu())
+            all_inputs_clip.append(inputs_clip.cpu())
 
     P_c = torch.cat(all_P_c, dim=0)
     P_tgt = torch.cat(all_P_tgt, dim=0)
     Y = torch.cat(all_labels, dim=0)
+    X_base = torch.cat(all_inputs, dim=0)
+    X_clip = torch.cat(all_inputs_clip, dim=0)
 
     Y_onehot = torch.zeros_like(P_c).scatter(1, Y.long().unsqueeze(1), 1)
     brier_c = ((Y_onehot - P_c) ** 2).mean().item()
@@ -881,6 +887,20 @@ def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
         'brier_tgt': brier_tgt,
         'G_norm_sq': G_norm_sq,
     }
+
+    # NTK 方法 B: 保存模型权重 + 采样子集图像供 Jacobian 计算
+    if getattr(cfg.BRIDGE, 'SAVE_MODEL', False):
+        ckpt['netF_state'] = {k: v.cpu() for k, v in netF.state_dict().items()}
+        ckpt['netB_state'] = {k: v.cpu() for k, v in netB.state_dict().items()}
+        ckpt['netC_state'] = {k: v.cpu() for k, v in netC.state_dict().items()}
+        # 保存少量图像供 NTK 计算用（从已收集数据中截取）
+        ntk_n = getattr(cfg.BRIDGE, 'NTK_SAMPLES', 10) * cfg.class_num
+        ntk_n = min(ntk_n, X_base.shape[0])
+        ckpt['ntk_inputs'] = X_base[:ntk_n]
+        ckpt['ntk_inputs_clip'] = X_clip[:ntk_n]
+        ckpt['ntk_labels'] = Y[:ntk_n]
+        ckpt['arch'] = cfg.MODEL.ARCH
+
     ckpt_path = osp.join(save_dir, f'bridge_{iter_num:06d}.pt')
     torch.save(ckpt, ckpt_path)
     logger.info(f'Bridge ckpt saved: {ckpt_path}')
