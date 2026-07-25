@@ -181,6 +181,87 @@ def layer0_verify(ckpts, output_dir):
 
 
 # ==============================================================================
+# Accuracy 折线图: CLIP vs Target 反超可视化
+# ==============================================================================
+
+def plot_accuracy_crossover(ckpts, output_dir):
+    """画 CLIP vs Target 精度折线图，标记反超点"""
+    iters = [c['iter'] for c in ckpts]
+    acc_c = [c.get('acc_c', None) for c in ckpts]
+    acc_tgt = [c.get('acc_tgt', None) for c in ckpts]
+
+    # 如果 checkpoint 没有预存 accuracy，从预测矩阵计算
+    for i, c in enumerate(ckpts):
+        if acc_c[i] is None:
+            pred_c = c['P_c'].argmax(1)
+            acc_c[i] = float((pred_c == c['labels']).float().mean().item() * 100)
+        if acc_tgt[i] is None:
+            pred_tgt = c['P_tgt'].argmax(1)
+            acc_tgt[i] = float((pred_tgt == c['labels']).float().mean().item() * 100)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+
+    # (a) 精度折线图
+    ax = axes[0]
+    ax.plot(iters, acc_tgt, 's-', color='#E67E22', markersize=6, linewidth=2,
+            label='CLIP (Zero-Shot)', zorder=2)
+    ax.plot(iters, acc_c, 'o-', color='#2980B9', markersize=6, linewidth=2,
+            label='Target Model (Adapted)', zorder=3)
+
+    # 找反超点: 第一个 acc_c > acc_tgt 的位置
+    crossover_iter = None
+    for i in range(len(iters)):
+        if acc_c[i] > acc_tgt[i]:
+            crossover_iter = iters[i]
+            ax.axvline(crossover_iter, color='red', linestyle='--', alpha=0.6,
+                       linewidth=1.5, label=f'Crossover (iter {crossover_iter})')
+            ax.annotate(f'iter {crossover_iter}\nCLIP={acc_tgt[i]:.1f}% Base={acc_c[i]:.1f}%',
+                        xy=(crossover_iter, acc_c[i]),
+                        xytext=(crossover_iter + (iters[-1]-iters[0])*0.15, acc_c[i] + 2),
+                        arrowprops=dict(arrowstyle='->', color='red'),
+                        fontsize=8, color='red')
+            break
+
+    ax.set_xlabel('Iteration')
+    ax.set_ylabel('Accuracy (%)')
+    ax.set_title('CLIP vs Target Model Accuracy')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # (b) 精度差 ΔAcc = Acc_Target - Acc_CLIP
+    ax = axes[1]
+    delta_acc = [c - t for c, t in zip(acc_c, acc_tgt)]
+    colors = ['#27AE60' if d > 0 else '#E74C3C' for d in delta_acc]
+    ax.bar(iters, delta_acc, color=colors, alpha=0.7, width=(iters[-1]-iters[0])/len(iters)*0.8)
+    ax.axhline(0, color='black', linewidth=1)
+    if crossover_iter:
+        ax.axvline(crossover_iter, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
+    ax.set_xlabel('Iteration')
+    ax.set_ylabel('Δ Accuracy (Target − CLIP) %')
+    ax.set_title('Accuracy Gap (positive = Target wins)')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # 标注最终精度
+    final_text = f'Final: CLIP={acc_tgt[-1]:.2f}%  Target={acc_c[-1]:.2f}%  Δ={delta_acc[-1]:+.2f}%'
+    ax.text(0.5, -0.12, final_text, transform=ax.transAxes, ha='center',
+            fontsize=10, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'layer0_accuracy_crossover.png')
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"[Accuracy] 保存: {path}")
+
+    return {
+        'crossover_iter': crossover_iter,
+        'final_acc_c': acc_c[-1],
+        'final_acc_tgt': acc_tgt[-1],
+        'final_delta': delta_acc[-1],
+    }
+
+
+# ==============================================================================
 # 第 0.5 层: 信任半径 (§3)
 # ==============================================================================
 
@@ -396,6 +477,17 @@ def main():
     report['layer0'] = layer0_verify(ckpts, output_dir)
     print(f"  反超检测: {report['layer0']['crossover_detected']}")
     print(f"  恒等式最大误差: {report['layer0']['max_identity_error']:.2e}")
+
+    # Accuracy 折线图
+    print("\n" + "=" * 40)
+    print("Accuracy Crossover: CLIP vs Target")
+    print("=" * 40)
+    report['accuracy'] = plot_accuracy_crossover(ckpts, output_dir)
+    if report['accuracy']['crossover_iter']:
+        print(f"  反超发生于 iter {report['accuracy']['crossover_iter']}")
+        print(f"  最终: CLIP={report['accuracy']['final_acc_tgt']:.2f}%  Target={report['accuracy']['final_acc_c']:.2f}%")
+    else:
+        print(f"  未检测到反超")
 
     # 第 0.5 层
     print("\n" + "=" * 40)

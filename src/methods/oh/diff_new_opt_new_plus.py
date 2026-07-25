@@ -877,6 +877,9 @@ def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
     brier_tgt = ((Y_onehot - P_tgt) ** 2).mean().item()
     G_norm_sq = ((P_tgt - P_c) ** 2).mean().item()
 
+    acc_c = float((P_c.argmax(1) == Y).float().mean().item() * 100)
+    acc_tgt = float((P_tgt.argmax(1) == Y).float().mean().item() * 100)
+
     ckpt = {
         'iter': iter_num,
         'epoch': epoch_num,
@@ -886,6 +889,8 @@ def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
         'brier_c': brier_c,
         'brier_tgt': brier_tgt,
         'G_norm_sq': G_norm_sq,
+        'acc_c': acc_c,
+        'acc_tgt': acc_tgt,
     }
 
     # NTK 方法 B: 保存模型权重 + 采样子集图像供 Jacobian 计算
