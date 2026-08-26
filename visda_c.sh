@@ -17,7 +17,7 @@ for s in ${s_list[*]}; do
         then
         continue
     fi
-        CUDA_VISIBLE_DEVICES=0 /data/home/scv8780/.conda/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
+        CUDA_VISIBLE_DEVICES=0 /data02/home/scv8780/.conda/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
             SETTING.S "$s" SETTING.T "$t" &
         wait
     done

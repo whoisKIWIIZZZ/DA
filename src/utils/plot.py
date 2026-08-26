@@ -58,7 +58,7 @@ def run_visualization(cfg):
     test_loader = DataLoader(ImageList_idx(txt_test, transform=image_test()), 
                              batch_size=cfg.TEST.BATCH_SIZE, shuffle=False, num_workers=cfg.NUM_WORKERS)
     
-    base_root = "/data/home/scv8780/run/sfda-my/SNE-MODELS" 
+    base_root = "/data02/home/scv8780/run/sfda-my/SNE-MODELS" 
     model_configs = {
         "A": ("source_F.pt", "source_B.pt"),
         "C": ("source_F.pt", "source_B.pt"),

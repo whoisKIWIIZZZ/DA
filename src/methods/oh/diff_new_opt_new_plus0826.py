@@ -514,7 +514,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
 
     mypromt = promote_learning_diff_promote_learning(cfg, clip_model, neg_embed).to(clip_model.visual.conv1.weight.device)
-    # modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
+    # modelpath = "/data02/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
     # mypromt.prompt_learner.load_state_dict(torch.load(modelpath))
    # mypromt.prompt_learner.ctx.register_hook(print_grad_hook)
     while iter_num < max_iter:
