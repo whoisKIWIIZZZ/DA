@@ -3,6 +3,7 @@ DATASET="office-home" # imagenet_c domainnet126 office-home
 METHOD="diff_align"          # shot nrc plue difo source-neg source_clip
 BRIDGE_MODE=false             # true=启用bridge实验checkpoint保存
 
+
 echo DATASET: $DATASET
 echo METHOD: $METHOD
 echo BRIDGE_MODE: $BRIDGE_MODE
