@@ -10,7 +10,7 @@ echo BRIDGE_MODE: $BRIDGE_MODE
 
 # 域索引→缩写映射 (Art/Clipart/Product/RealWorld → A/C/P/R)
 domain_abbr=(A C P R)
-PYTHON=/data/home/scv8780/.conda/envs/sfa/bin/python
+PYTHON=/data02/home/scv8780/.conda/envs/sfa/bin/python
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
