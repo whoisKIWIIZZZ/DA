@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torchvision import transforms
 # from src.utils import loss,prompt_tuning,IID_losses
 from src.utils import loss,IID_losses
@@ -21,6 +22,115 @@ logger = logging.getLogger(__name__)
 
 import wandb
 import copy
+
+def normalized_confidence(probabilities):
+    num_classes = probabilities.size(1)
+    entropy_value = -(probabilities * torch.log(probabilities + 1e-8)).sum(dim=1)
+    return (1.0 - entropy_value / np.log(num_classes)).clamp(0.0, 1.0)
+
+
+def js_stability(first, second):
+    midpoint = 0.5 * (first + second)
+    first_kl = (first * (torch.log(first + 1e-8) - torch.log(midpoint + 1e-8))).sum(dim=1)
+    second_kl = (second * (torch.log(second + 1e-8) - torch.log(midpoint + 1e-8))).sum(dim=1)
+    return (1.0 - 0.5 * (first_kl + second_kl) / np.log(2.0)).clamp(0.0, 1.0)
+
+
+def adaptive_mix_weight(q_target, q_clip, target_output, clip_history, clip_history_seen,
+                        observation_count, target_loss, clip_loss, cfg):
+    target_confidence = normalized_confidence(q_target)
+    clip_confidence = normalized_confidence(q_clip)
+    target_stability = js_stability(q_target, target_output)
+    clip_reference = torch.where(clip_history_seen.unsqueeze(1), clip_history, q_clip)
+    clip_stability = js_stability(q_clip, clip_reference)
+
+    confidence_weight = cfg.DIFF_ALIGN.MERGE_CONFIDENCE_WEIGHT
+    stability_weight = cfg.DIFF_ALIGN.MERGE_STABILITY_WEIGHT
+    weight_sum = confidence_weight + stability_weight
+    target_reliability = (
+        confidence_weight * target_confidence + stability_weight * target_stability
+    ) / weight_sum
+    clip_reliability = (
+        confidence_weight * clip_confidence + stability_weight * clip_stability
+    ) / weight_sum
+
+    initial_target_weight = cfg.DIFF_ALIGN.MERGE_INITIAL_TARGET_WEIGHT
+    initial_logit = np.log(initial_target_weight / (1.0 - initial_target_weight))
+    prior_bias = initial_logit * torch.exp(
+        -observation_count / cfg.DIFF_ALIGN.MERGE_PRIOR_DECAY
+    )
+    prior_logit = prior_bias + (
+        target_reliability - clip_reliability
+    ) / cfg.DIFF_ALIGN.MERGE_GATE_TEMPERATURE
+    min_weight = cfg.DIFF_ALIGN.MERGE_MIN_WEIGHT
+    prior = torch.sigmoid(prior_logit).clamp(min_weight, 1.0 - min_weight)
+
+    robust_logit = torch.logit(prior) + (
+        target_loss.detach() - clip_loss.detach()
+    ) / cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE
+    alpha = torch.sigmoid(robust_logit).clamp(min_weight, 1.0 - min_weight)
+    return (
+        alpha.detach(), prior.detach(), target_confidence.detach(), clip_confidence.detach(),
+        target_stability.detach(), clip_stability.detach()
+    )
+
+
+def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction, clip_prediction,
+                     label_bank, target_confidence, clip_confidence, target_stability,
+                     clip_stability, cfg):
+    valid = alpha_seen & (label_bank >= 0) & (target_prediction >= 0) & (clip_prediction >= 0)
+    if not valid.any():
+        return 'Gate: no observations'
+
+    alpha = alpha_bank[valid]
+    target_prediction = target_prediction[valid]
+    clip_prediction = clip_prediction[valid]
+    labels = label_bank[valid]
+    target_correct = target_prediction == labels
+    clip_correct = clip_prediction == labels
+    disagreement = target_prediction != clip_prediction
+    selected_prediction = torch.where(alpha >= 0.5, target_prediction, clip_prediction)
+    quantiles = torch.quantile(alpha, torch.tensor([0.1, 0.5, 0.9], device=alpha.device))
+
+    target_only = target_correct & ~clip_correct
+    clip_only = clip_correct & ~target_correct
+    target_only_alpha = alpha[target_only].mean().item() if target_only.any() else float('nan')
+    clip_only_alpha = alpha[clip_only].mean().item() if clip_only.any() else float('nan')
+    if disagreement.any():
+        target_disagreement_acc = target_correct[disagreement].float().mean().item() * 100
+        clip_disagreement_acc = clip_correct[disagreement].float().mean().item() * 100
+        selected_disagreement_acc = (
+            selected_prediction[disagreement] == labels[disagreement]
+        ).float().mean().item() * 100
+    else:
+        target_disagreement_acc = float('nan')
+        clip_disagreement_acc = float('nan')
+        selected_disagreement_acc = float('nan')
+
+    low_confidence = cfg.DIFF_ALIGN.MERGE_LOW_CONFIDENCE
+    both_low = (
+        (target_confidence[valid] < low_confidence)
+        & (clip_confidence[valid] < low_confidence)
+    ).float().mean().item() * 100
+    min_weight = cfg.DIFF_ALIGN.MERGE_MIN_WEIGHT
+    saturated_low = (alpha <= min_weight + 1e-6).float().mean().item() * 100
+    saturated_high = (alpha >= 1.0 - min_weight - 1e-6).float().mean().item() * 100
+
+    return (
+        'Gate: n={}; alpha mean={:.3f}, p10/50/90={:.3f}/{:.3f}/{:.3f}; prior={:.3f}; '
+        'conf target/clip={:.3f}/{:.3f}; stability target/clip={:.3f}/{:.3f}; '
+        'sat low/high={:.1f}%/{:.1f}%; disagree={:.1f}%; '
+        'disagree acc target/clip/selected={:.2f}%/{:.2f}%/{:.2f}%; '
+        'oracle alpha target-only/clip-only={:.3f}/{:.3f}; both-low-conf={:.1f}%'
+    ).format(
+        alpha.numel(), alpha.mean().item(), quantiles[0].item(), quantiles[1].item(),
+        quantiles[2].item(), prior_bank[valid].mean().item(),
+        target_confidence[valid].mean().item(), clip_confidence[valid].mean().item(),
+        target_stability[valid].mean().item(), clip_stability[valid].mean().item(),
+        saturated_low, saturated_high, disagreement.float().mean().item() * 100,
+        target_disagreement_acc, clip_disagreement_acc, selected_disagreement_acc,
+        target_only_alpha, clip_only_alpha, both_low
+    )
 #初始化
 def copy_netC(netC,netC_aux,num_known_classes):
     state_dict_C = netC.state_dict()
@@ -329,54 +439,25 @@ def op_copy(optimizer):
     return optimizer
 
 
-def print_cfg(cfg):
-    s = "==========================================\n"
-    for arg, content in cfg.__dict__.items():
-        s += "{}:{}\n".format(arg, content)
-    return s
 
 
-@torch.no_grad()
-def eval_neg_metrics(dset_loaders, mypromt, cfg):
-    """评估负向嵌入：NegAcc 和 mean rank（rank1=真类neg_logits最低）"""
-    all_neg_logits = []
-    all_labels = []
-    for data in dset_loaders["clip_test"]:
-        inputs = data[0][1]
-        labels = data[1]
-        inputs = inputs.cuda()
-        img_feats = mypromt.clip_model.encode_image(inputs.type(mypromt.clip_model.dtype))
-        img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-        hidden_norm = mypromt.hidden_features / mypromt.hidden_features.norm(dim=-1, keepdim=True)
-        neg_logits = mypromt.clip_model.logit_scale.exp() * img_feats @ hidden_norm.t()
-        all_neg_logits.append(neg_logits.cpu())
-        all_labels.append(labels)
-    neg_logits = torch.cat(all_neg_logits)
-    labels = torch.cat(all_labels)
-    neg_pred = neg_logits.argmin(1)
-    neg_acc = (neg_pred == labels).float().mean().item() * 100
-    ranks = neg_logits.argsort(dim=1).argsort(dim=1)
-    true_ranks = ranks.gather(1, labels.unsqueeze(1)).float()
-    rank1 = (true_ranks == 0).float().mean().item() * 100
-    mean_rank = true_ranks.mean().item() + 1  # rank 从 1 开始
-    return {'neg_acc': neg_acc, 'rank1': rank1, 'mean_rank': mean_rank}
 
 
-def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = True,use_clip = True,aux_begin=0.3):
+def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
+                 use_clip=True, aux_begin=0.3):
     print("using the new opt file")
-    print("iid:{},cls:{},clip:{}".format(use_iid,use_cls,use_clip))
+    print("iid:{},cls:{},clip:{}".format(use_iid, use_cls, use_clip))
     acc = 0
-    is_merge_stratg_use = True  # 加入衰减策略，保持高精度模型对低精度模型的指导(优先选False,还可true)!!!!!!!!!!!!!!!!!!!!
-    abulations = 0  # 衰减系数
-
-    beta_pre_1 = beta_pre_1
-    beta_pre_2 = beta_pre_2# 原是0.2
-    aux_begin = aux_begin
     aux_end = 0.1
-   
+
     print("aux_begin:", aux_begin, "aux_end:", aux_end)
-    print("is_merge_stratg_use",
-          is_merge_stratg_use, "beta_pre_1:", beta_pre_1, "beta_pre_2:", beta_pre_2)
+    print(
+        "entropy bank beta:", beta_pre_1, beta_pre_2,
+        "merge initial target weight:", cfg.DIFF_ALIGN.MERGE_INITIAL_TARGET_WEIGHT,
+        "confidence/stability:", cfg.DIFF_ALIGN.MERGE_CONFIDENCE_WEIGHT,
+        cfg.DIFF_ALIGN.MERGE_STABILITY_WEIGHT,
+        "robust temperature:", cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE
+    )
     # clip模型参数初始化
     clip_model, preprocess, _ = clip.load(cfg.DIFF_ALIGN.ARCH)  # type: ignore # vit-B32
     clip_model.float()
@@ -393,13 +474,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
     netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
     netC = network.feat_classifier(type='wn', class_num=cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
-
-   
-
-    netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num + cfg.class_num_hidden, bottleneck_dim=cfg.bottleneck).cuda()
-      # 提取用source数据训练出的模型
-   
-    
+ 
     modelpath = cfg.output_dir_src + '/source_F.pt'
     netF.load_state_dict(torch.load(modelpath),strict=True) # type: ignore
     modelpath = cfg.output_dir_src + '/source_B.pt'
@@ -408,23 +483,11 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     netC.load_state_dict(torch.load(modelpath))
 
 
-    old_fc = netC.fc
-    new_fc = torch.nn.utils.weight_norm(nn.Linear(old_fc.in_features, cfg.class_num + cfg.class_num_hidden).cuda())
-    with torch.no_grad():
-        new_fc.weight_g.data[:cfg.class_num].copy_(old_fc.weight_g.data)
-        new_fc.weight_v.data[:cfg.class_num].copy_(old_fc.weight_v.data)
-        new_fc.bias.data[:cfg.class_num].copy_(old_fc.bias.data)
-
-        if cfg.class_num_hidden >0:
-            print("Yes,we use hidden classes.")
-            torch.nn.init.kaiming_uniform_(new_fc.weight_g.data[cfg.class_num:], a=0, mode='fan_in', nonlinearity='linear')
-            new_fc.bias.data[cfg.class_num:].zero_()
-    netC_aux.fc = new_fc
     netC.eval()
 
     param_group = []
     param_group_C = []
-    param_group_aux = []
+    
 
     
     
@@ -432,11 +495,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     for k,v in netC.named_parameters():
         v.requires_grad = True
         param_group_C +=  [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1*0.3}]
-    if cfg.class_num_hidden > 0 :
-        for k,v in netC_aux.named_parameters():
-            v.requires_grad = True
-            param_group_aux +=  [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
-    else: param_group_aux = param_group_C
+
 
     for k, v in netF.named_parameters():
         if cfg.OPTIM.LR_DECAY1 > 0:
@@ -454,8 +513,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     optimizer = optim.SGD(param_group)
     optimizer = op_copy(optimizer)
 
-    opt_aux = optim.SGD(param_group_aux)
-    opt_aux = op_copy(opt_aux)
+    
 
     opt_C = optim.SGD(param_group_C)
     opt_C = op_copy(opt_C)
@@ -465,10 +523,20 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     # score_bank包含所有样本
     score_bank = torch.randn(num_sample, cfg.class_num).cuda()  # 4365目标样本,65类
     source_score_bank = torch.zeros(num_sample).cuda()
+    clip_score_bank = torch.zeros(num_sample, cfg.class_num).cuda()
+    clip_score_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
+    gate_observation_bank = torch.zeros(num_sample, device=score_bank.device)
+    alpha_bank = torch.zeros(num_sample, device=score_bank.device)
+    alpha_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
+    target_confidence_bank = torch.zeros(num_sample, device=score_bank.device)
+    clip_confidence_bank = torch.zeros(num_sample, device=score_bank.device)
+    prior_bank = torch.zeros(num_sample, device=score_bank.device)
+    target_stability_bank = torch.zeros(num_sample, device=score_bank.device)
+    clip_stability_bank = torch.zeros(num_sample, device=score_bank.device)
+    target_score_bank = torch.zeros(num_sample, device=score_bank.device)
     netF.eval()
     netB.eval()
     netC.eval()
-    netC_aux.eval()
     with torch.no_grad():
         iter_test = iter(loader)
         for i in range(len(loader)):
@@ -503,7 +571,8 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     loss_neg = torch.tensor(0.0)
 
 
-    mypromt = promote_learning_diff_promote_learning(cfg, clip_model, neg_embed).to(clip_model.visual.conv1.weight.device)
+    mypromt = promote_learning_diff_promote_learning(cfg, clip_model).to(clip_model.visual.conv1.weight.device)
+    gate_log_str = 'Gate: no observations'
     # modelpath = "/data/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
     # mypromt.prompt_learner.load_state_dict(torch.load(modelpath))
    # mypromt.prompt_learner.ctx.register_hook(print_grad_hook)
@@ -521,39 +590,44 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
         
         if inputs_test.size(0) == 1:
             continue
-        if cfg.SETTING.DATASET == 'office-home' and iter_num % (copy_iter ) == 0:
-            copy_netC(netC,netC_aux,cfg.class_num)
-        if cfg.SETTING.DATASET == ' VISDA-C' and iter_num % (copy_iter//8 ) == 0:
-            copy_netC(netC,netC_aux,cfg.class_num)
-        # 就是这一段，在把vil模型固定的同时，使得vil的输入特征变成可以学习的
-        if iter_num % interval_iter == 0 and cfg.DIFF_ALIGN.CLS_PAR > 0:
-            #copy_netC(netC,netC_aux,cfg.class_num)
+        evaluate_now = iter_num == 0 or (iter_num + 1) % interval_iter == 0 or iter_num + 1 == max_iter
+        if evaluate_now and cfg.DIFF_ALIGN.CLS_PAR > 0:
             netF.eval()
             netB.eval()
             netC.eval()
-            netC_aux.eval()
-            epoch_num = int(iter_num/interval_iter)
-            # confi-img是图像位置，confi_dis是得到的两模型sofamax后相加的结果，这里是想得到clip+resnet50的总的推断结果
-            # 注意到，这里是基于测试数据的。同时也是用于测试clip精度的
-            test_clip_all_output = CLIP_model_eval(dset_loaders['clip_test'], text_inputs, text_features, clip_model,cfg)
-            # 分析模型重叠
-            #cal_satistical_info(dset_loaders['clip_test'], netF, netB, netC, test_clip_all_output,cfg, flag=False)
-            target_score_bank = torch.zeros(num_sample).cuda()
+            epoch_num = int((iter_num + 1) / interval_iter)
+            test_clip_all_output = CLIP_model_eval(
+                dset_loaders['clip_test'], text_inputs, text_features, clip_model, cfg
+            )
+            clip_prediction_bank = test_clip_all_output.argmax(dim=1).to(score_bank.device)
+            target_prediction_bank = torch.full(
+                (num_sample,), -1, dtype=torch.long, device=score_bank.device
+            )
+            eval_label_bank = torch.full_like(target_prediction_bank, -1)
+            target_score_bank.zero_()
             with torch.no_grad():
                 test_iter = iter(dset_loaders["test"])
                 for _ in range(len(dset_loaders["test"])):
                     test_data = next(test_iter)
                     test_inputs = test_data[0][0]
-                    test_indx = test_data[-1]
+                    test_labels = test_data[1]
+                    test_indx = test_data[-1].to(score_bank.device)
                     test_inputs = test_inputs.cuda()
                     test_outputs = netC(netB(netF(test_inputs)))
                     test_softmax = nn.Softmax(dim=1)(test_outputs)
                     test_scores = -torch.sum(test_softmax * torch.log(test_softmax + 1e-9), dim=1)
                     target_score_bank[test_indx] = test_scores
+                    target_prediction_bank[test_indx] = test_softmax.argmax(dim=1)
+                    eval_label_bank[test_indx] = test_labels.to(score_bank.device).long()
+
+            gate_log_str = gate_diagnostics(
+                alpha_bank, alpha_seen, prior_bank, target_prediction_bank,
+                clip_prediction_bank, eval_label_bank, target_confidence_bank,
+                clip_confidence_bank, target_stability_bank, clip_stability_bank, cfg
+            )
             netF.train()
             netB.train()
             netC.train()
-            netC_aux.train()
 
 
         logit_clip_score, text_features = mypromt(inputs_clip)
@@ -595,118 +669,96 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
 
         features_shared = netF(inputs_test)
         features_classify = netB(features_shared)
-        outputs_test = netC_aux(features_classify)
+        
         base_outputs_test = netC(features_classify)
         base_softmax_out = nn.Softmax(dim=1)(base_outputs_test)
-        neg_softmax_out = nn.Softmax(dim=1)(outputs_test[:,cfg.class_num:])
-        softmax_out = torch.cat([base_softmax_out,neg_softmax_out],dim=1)
+        softmax_out = base_softmax_out
         #softmax_out = nn.Softmax(dim=1)(outputs_test)
 
-        abulations = beta_pre_1 * iter_num / max_iter + beta_pre_2 # 0.1~1.1
-        d =(beta_pre_1/20) * iter_num / max_iter + (beta_pre_2/10) #0.01~0.06
-        source_score_bank[tar_idx] = (1-d)*source_score_bank[tar_idx] + d*target_score_bank[tar_idx]
+        d = (beta_pre_1 / 20) * iter_num / max_iter + (beta_pre_2 / 10)
+        source_score_bank[tar_idx] = (
+            (1 - d) * source_score_bank[tar_idx] + d * target_score_bank[tar_idx]
+        )
         current_batch_scores = source_score_bank[tar_idx]
         avg_score = current_batch_scores.mean().item()
 
-        diff = torch.abs(-torch.sum(base_softmax_out * torch.log(base_softmax_out+1e-5), 1)-avg_score)
+        diff = torch.abs(
+            -torch.sum(base_softmax_out * torch.log(base_softmax_out + 1e-5), 1) - avg_score
+        )
         diff = diff.detach().clone()
 
-        margin = 0.01*(1.01**(epoch_num-1))
+        margin = 0.01 * (1.01 ** (epoch_num - 1))
         loss_ent = entropy(base_softmax_out, avg_score, margin)
         mask_greater = diff > margin
         indices_greater = torch.where(mask_greater)[0]
 
-        ln_sam = softmax_out.shape[0]
-        # data = basedata[0:ln_sam]
-
-        if getattr(cfg.DIFF_ALIGN, 'MERGE_ADAPTIVE', True):
-            data = np.random.exponential(scale=abulations, size=ln_sam)
-            data[data > 1] = 1
-        else:
-            data = np.random.exponential(scale=0.1, size=ln_sam)
-
-        data = np.expand_dims(data, axis=1)
-        data = torch.from_numpy(data)
-        data = data.numpy()
-
-        K = base_softmax_out.size(1)
-        
-        base_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,:cfg.class_num])
-        neg_clip_all_output = nn.Softmax(dim=1)(logit_clip_score_include_hidden[:,cfg.class_num:])
-        clip_all_output = torch.cat([base_clip_all_output, neg_clip_all_output], dim=1)
-        clip_final = logit_clip_score_include_hidden[:,:cfg.class_num]
-        #clip_all_output =   nn.Softmax(dim=1)(logit_clip_score_include_hidden)
-        _, predict = torch.max(base_softmax_out, 1)  # 从bank来的
-        _, clip_predict = torch.max(clip_final, 1)  # 从test clip来
-
-        predict_one = np.eye(K)[predict.cpu()]
-        clip_one = np.eye(K)[clip_predict.cpu()]
-        predict_mix = data * predict_one + (1 - data) * clip_one
-        predict_mix = torch.from_numpy(predict_mix).cuda()
-
-        # 负向嵌入显式 CE 训练
-        if mypromt.hidden_features is not None and mypromt.class_num_hidden > 0:
-            with torch.no_grad():
-                img_feats = mypromt.clip_model.encode_image(inputs_clip.type(mypromt.clip_model.dtype))
-                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-            hidden_norm = mypromt.hidden_features / mypromt.hidden_features.norm(dim=-1, keepdim=True)
-            neg_logits = mypromt.clip_model.logit_scale.exp() * img_feats @ hidden_norm.t()
-            with torch.no_grad():
-                pseudo_labels = predict_mix.argmax(1)
-            loss_neg = nn.CrossEntropyLoss()(-neg_logits, pseudo_labels)
-            try:
-                opt_neg.zero_grad()
-            except:
-                opt_neg = torch.optim.SGD([mypromt.hidden_features], lr=cfg.OPTIM.LR * 0.1, weight_decay=0, momentum=0.9, nesterov=False)
-                opt_neg.zero_grad()
-            loss_neg.backward()
-            opt_neg.step()
-
-
-        if cfg.DIFF_ALIGN.CLS_PAR > 0 and use_cls == True:
-            targets = predict_mix[indices_greater]
-            outputs_log_softmax = base_outputs_test[indices_greater]
-            pseudo_label_loss = (- targets * outputs_log_softmax).sum(dim=1).mean()
-
-            classifier_loss = pseudo_label_loss * 0.4
-        else:
-            classifier_loss = torch.tensor(0.0).cuda()
-
-        neg_iter = 0
-        warmup_iter = 0
-        warmup_iter = 80
-        neg_iter = 100 #officehome
-        #overclustering
-        bb = 1- current_aux
-        nnn = 1-current_aux if iter_num > neg_iter else 0.01
-        bn = -0.3
-        loss_aux,loss_mat = IID_losses.IID_loss(
-            cfg.class_num,
-            softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
-            clip_all_output[indices_greater],
-            bb,
-            nnn,
-            bn,#[CLS] - not a [CLS]
-            lamb = 1.0
+        base_clip_all_output = nn.Softmax(dim=1)(
+            logit_clip_score_include_hidden[:, :cfg.class_num]
         )
+        clip_all_output = base_clip_all_output
+        q_target = score_bank[tar_idx].detach()
+        q_clip = base_clip_all_output.detach()
+        log_prob = F.log_softmax(base_outputs_test, dim=1)
+        target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
+        clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
+        alpha, prior, target_confidence, clip_confidence, target_stability, clip_stability = (
+            adaptive_mix_weight(
+                q_target,
+                q_clip,
+                base_softmax_out.detach(),
+                clip_score_bank[tar_idx],
+                clip_score_seen[tar_idx],
+                gate_observation_bank[tar_idx],
+                target_loss_per_sample,
+                clip_loss_per_sample,
+                cfg
+            )
+        )
+        predict_mix = alpha.unsqueeze(1) * q_target + (1.0 - alpha.unsqueeze(1)) * q_clip
 
+        has_selected_samples = indices_greater.numel() > 0
+        if cfg.DIFF_ALIGN.CLS_PAR > 0 and use_cls and has_selected_samples:
+            pseudo_label_loss = -(
+                predict_mix[indices_greater] * log_prob[indices_greater]
+            ).sum(dim=1).mean()
+            classifier_loss = pseudo_label_loss * cfg.DIFF_ALIGN.CLS_PAR
+        else:
+            classifier_loss = base_outputs_test.new_zeros(())
 
-        # 设置打印选项，确保不换行且保留小数位
-        # np.set_printoptions(precision=4, suppress=True, linewidth=200)
-        
-        # print("\n" + "="*30)
-        # df = pd.DataFrame(loss_mat.detach().cpu().numpy())
-        # print(df.to_string()) 
-        
-        # print("="*30 + "\n")
-        m_base_sft = base_softmax_out.mean(dim=0) 
-        loss_iid = loss_aux
-        if use_iid == False:
-            loss_iid = torch.tensor(0.0).cuda()
+        warmup_iter = 80
+        neg_iter = 100
+        bb = 1 - current_aux
+        nnn = 1 - current_aux if iter_num > neg_iter else 0.01
+        bn = -0.3
+        if use_iid and has_selected_samples:
+            loss_iid, loss_mat = IID_losses.IID_loss(
+                cfg.class_num,
+                softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
+                clip_all_output[indices_greater],
+                bb,
+                nnn,
+                bn,
+                lamb=1.0
+            )
+        else:
+            loss_iid = base_outputs_test.new_zeros(())
+            loss_mat = None
+
+        m_base_sft = base_softmax_out.mean(dim=0)
         gentropy_loss = torch.sum(-m_base_sft * torch.log(m_base_sft + cfg.LCFD.EPSILON)) 
       
         with torch.no_grad():
-            score_bank[tar_idx] = base_softmax_out.detach().clone()
+            score_bank[tar_idx] = base_softmax_out.detach()
+            clip_score_bank[tar_idx] = q_clip
+            clip_score_seen[tar_idx] = True
+            gate_observation_bank[tar_idx] += 1
+            alpha_bank[tar_idx] = alpha
+            alpha_seen[tar_idx] = True
+            target_confidence_bank[tar_idx] = target_confidence
+            clip_confidence_bank[tar_idx] = clip_confidence
+            prior_bank[tar_idx] = prior
+            target_stability_bank[tar_idx] = target_stability
+            clip_stability_bank[tar_idx] = clip_stability
 
         optimizer.zero_grad()
         opt_C.zero_grad()
@@ -735,10 +787,9 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
             netC.eval()
             if cfg.SETTING.DATASET == 'VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, True)
-                acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, True)
                 
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
-                                                                                     acc_s_te,acc_s_te_aux,
+                                                                                     acc_s_te,
                                                                                      total_loss,loss_iid,classifier_loss,gentropy_loss) + '\n' + acc_list
                 if iter_num == max_iter:
                     acc =acc_s_te
@@ -748,9 +799,6 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
                 acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
                 neg_str = ''
-                if mypromt.hidden_features is not None:
-                    nm = eval_neg_metrics(dset_loaders, mypromt, cfg)
-                    neg_str = f' neg_loss={loss_neg.item():.4f} NegAcc={nm["neg_acc"]:.1f}% Rank1={nm["rank1"]:.1f}% meanR={nm["mean_rank"]:.1f}'
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}{}'.format(cfg.name, iter_num, max_iter,
                                                                                      acc_s_te,acc_s_te_aux,
                                                                                      total_loss, neg_str)
@@ -759,6 +807,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                     acc = acc_s_te
              #   wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
                     
+            log_str += '\n' + gate_log_str
             logger.info(log_str)
 
            

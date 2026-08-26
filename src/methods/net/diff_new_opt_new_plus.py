@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 import copy
 
 
+
 def copy_netC(netC, netC_aux, num_known_classes):
     state_dict_C = netC.state_dict()
     state_dict_C_aux = netC_aux.state_dict()
