@@ -46,7 +46,7 @@ def CLIP_model_eval(loader, text_inputs, text_features, clip_model,cfg):
             data = next(iter_test)
            #3 inputs = data[0][0] #192*3*224*224,但我这里出来的就是三维的
            # print('DEBUG: type(data):', type(data), 'len(data):', len(data), 'type(data[0]):', type(data[0]))
-            inputs = data[0]
+            inputs = data[0][1]
             labels = data[1]
             inputs = inputs.cuda()
             if (text_features!=None):

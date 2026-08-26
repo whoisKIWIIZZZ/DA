@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -o ConnectTimeout=10 \"scv8780@BSCC-N26@ssh.cn-nanjing-n26.paracloud.com\" \"cd run/sfda-my && pwd && echo '---' && ls -la\")",
+      "Bash(ssh -o ConnectTimeout=10 \"scv8780@BSCC-N26@ssh.cn-nanjing-n26.paracloud.com\" \"cp -r /data02/home/scv8780/run/sfda-my /data02/home/scv8780/run/sfda-my.bak.$\\(date +%Y%m%d_%H%M%S\\) && echo '备份完成' && ls -ld /data02/home/scv8780/run/sfda-my.bak.*\")",
+      "Bash(rtk wc *)",
+      "Bash(rtk rsync *)",
+      "Bash(ssh -o ConnectTimeout=10 \"scv8780@BSCC-N26@ssh.cn-nanjing-n26.paracloud.com\" \"ls -la /data02/home/scv8780/run/sfda-my/output_Models/uda/office-home/AC/diff_align/bridge_ckpts/analysis/\")",
+      "Bash(chmod +x /Users/yishouzhuo/whu_files/DA/FKDA/tools/analyze_bridge.sh)",
+      "Bash(rsync -avz /Users/yishouzhuo/whu_files/DA/FKDA/src/utils/prompt_tuning_diff_new_optim_1130.py scv8780@BSCC-N26@ssh.cn-nanjing-n26.paracloud.com:/data02/home/scv8780/run/sfda-my/src/utils/prompt_tuning_diff_new_optim_1130.py)",
+      "Bash(ssh -o ConnectTimeout=10 \"scv8780@BSCC-N26@ssh.cn-nanjing-n26.paracloud.com\" \"rm -f /data02/home/scv8780/run/sfda-my/diff_new_opt_new_plus.py /data02/home/scv8780/run/sfda-my/prompt_tuning_diff_new_optim_1130.py && echo 'cleaned'\")"
+    ]
+  }
+}

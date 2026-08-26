@@ -1,0 +1,92 @@
+{
+  "bridge_dir": "output_Models/uda/office-home/AC/diff_align/bridge_ckpts",
+  "n_checkpoints": 15,
+  "iter_range": [
+    414,
+    6210
+  ],
+  "class_num": 65,
+  "num_samples": 4365,
+  "layer0": {
+    "crossover_detected": true,
+    "crossover_checkpoints": [
+      828,
+      1242,
+      1656,
+      2070,
+      2484,
+      2898,
+      3312,
+      3726,
+      4140,
+      4554,
+      4968,
+      5382,
+      5796,
+      6210
+    ],
+    "max_identity_error": 5.21540641784668e-08
+  },
+  "layer05": {
+    "norm_Z": 0.6748035029832988,
+    "norm_G0": 0.4480675916197548,
+    "threshold": 0.2240337958098774,
+    "pred_initial_lead": false,
+    "actual_initial_delta": 0.007658958435058594,
+    "prediction_correct": true
+  },
+  "layer1": {
+    "n_modes": 6,
+    "top_explained_var_pct": 89.6973729133606,
+    "modes": [
+      {
+        "mode": 1,
+        "a_i": 1.2761092571034433e-05,
+        "a_i_sign": "positive",
+        "explained_var_pct": 44.51672434806824,
+        "dominates_crossover": true,
+        "max_neg_contribution": -7.490953512733697e-06
+      },
+      {
+        "mode": 2,
+        "a_i": 2.0787281205357602e-06,
+        "a_i_sign": "positive",
+        "explained_var_pct": 17.676274478435516,
+        "dominates_crossover": true,
+        "max_neg_contribution": -1.0683604218490651e-05
+      },
+      {
+        "mode": 3,
+        "a_i": 1.8852399728830303e-06,
+        "a_i_sign": "positive",
+        "explained_var_pct": 11.199211329221725,
+        "dominates_crossover": true,
+        "max_neg_contribution": -3.6908785576244294e-06
+      },
+      {
+        "mode": 4,
+        "a_i": 3.541227320888917e-08,
+        "a_i_sign": "positive",
+        "explained_var_pct": 7.629600912332535,
+        "dominates_crossover": true,
+        "max_neg_contribution": -1.5201321950937482e-06
+      },
+      {
+        "mode": 5,
+        "a_i": -1.2173221979898579e-08,
+        "a_i_sign": "negative",
+        "explained_var_pct": 5.22734597325325,
+        "dominates_crossover": false,
+        "max_neg_contribution": -2.3247921215346708e-06
+      },
+      {
+        "mode": 6,
+        "a_i": 3.7203558351941917e-09,
+        "a_i_sign": "positive",
+        "explained_var_pct": 3.4482192248106003,
+        "dominates_crossover": true,
+        "max_neg_contribution": -1.1361788120183891e-06
+      }
+    ]
+  }
+}

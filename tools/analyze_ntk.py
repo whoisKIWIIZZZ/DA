@@ -18,7 +18,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import clip as clip_lib
+try:
+    import clip as clip_lib
+except ModuleNotFoundError:
+    clip_lib = None
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -57,6 +60,8 @@ def forward_base(netF, netB, netC, x, class_num):
 
 def build_clip_model(arch):
     """加载 CLIP 模型"""
+    if clip_lib is None:
+        raise RuntimeError("clip 模块未安装，无法加载 CLIP 模型。请先安装: pip install git+https://github.com/openai/CLIP.git")
     model, _ = clip_lib.load(arch)
     model.float().cuda().eval()
     return model
@@ -408,6 +413,8 @@ def plot_ntk_results(ntk_results, empirical_rhos, proj, output_dir):
 
 def make_text_inputs_for_clip(name_file, ctx_init, arch):
     """构建 CLIP 文本输入（零样本）"""
+    if clip_lib is None:
+        raise RuntimeError("clip 模块未安装")
     with open(name_file) as f:
         classnames = [line.split()[0].replace("_", " ") for line in f.readlines()]
     prompt_prefix = ctx_init.replace("_", " ")
@@ -456,16 +463,24 @@ def main():
     for r in emp_rhos:
         print(f"  Mode {r['mode']}: ρ_emp={r['rho_emp']:.6f}, g0={r['g0']:.6f}, var={r['explained_var']*100:.1f}%")
 
-    # NTK 分析（需要模型权重）
+    # NTK 分析（需要模型权重，从独立文件 bridge_ntk_base.pt 加载）
     ntk_results = None
-    ckpt_with_model = ckpts[-1]  # 用最后一个 checkpoint（最终模型）
-    has_model = all(k in ckpt_with_model for k in ['netF_state', 'ntk_inputs'])
+    ntk_base_path = os.path.join(args.bridge_dir, 'bridge_ntk_base.pt')
+    has_model = os.path.exists(ntk_base_path)
 
     if has_model:
-        print(f"\n[4/4] NTK 逐模分析 (需模型权重, {ckpt_with_model['ntk_inputs'].shape[0]} 样本)...")
-        ntk_results = per_mode_ntk_analysis(ckpt_with_model, pca, proj, args)
+        ntk_base = torch.load(ntk_base_path, map_location='cpu', weights_only=False)
+        ntk_n = ntk_base['ntk_inputs'].shape[0]
+        print(f"\n[4/4] NTK 逐模分析 (加载 bridge_ntk_base.pt, {ntk_n} 样本)...")
+        # 将 NTK 数据临时注入最后一个 ckpt 供现有逻辑使用
+        ckpt_with_model = ckpts[-1].copy()
+        ckpt_with_model.update(ntk_base)
+        try:
+            ntk_results = per_mode_ntk_analysis(ckpt_with_model, pca, proj, args)
+        except RuntimeError as e:
+            print(f"  NTK 分析跳过: {e}")
     else:
-        print("\n[4/4] 跳过 NTK (未保存模型权重, 设置 BRIDGE.SAVE_MODEL=True 重新训练)")
+        print("\n[4/4] 跳过 NTK (未找到 bridge_ntk_base.pt, 设置 BRIDGE.SAVE_MODEL=True 重新训练)")
 
     # 画图
     plot_ntk_results(ntk_results, emp_rhos, proj, output_dir)

@@ -67,16 +67,7 @@ def print_grad_hook(grad):
     if grad.norm().item() > 100:
         print('Hook: Grad recieved with norm {}'.format(grad.norm().item()))
 
-def image_test(resize_size=256, crop_size=224, alexnet=False):
-    if not alexnet:
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-    return transforms.Compose([
-        transforms.Resize((resize_size, resize_size)),
-        transforms.CenterCrop(crop_size),
-        transforms.ToTensor(),
-        normalize
-    ])
+
 
 
 def image_test_50(resize_size=256, crop_size=224, alexnet=False):
@@ -387,7 +378,7 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     print("is_merge_stratg_use",
           is_merge_stratg_use, "beta_pre_1:", beta_pre_1, "beta_pre_2:", beta_pre_2)
     # clip模型参数初始化
-    clip_model, preprocess, _ = clip.load(cfg.DIFF_ALIGN.ARCH)  # vit-B32
+    clip_model, preprocess, _ = clip.load(cfg.DIFF_ALIGN.ARCH)  # type: ignore # vit-B32
     clip_model.float()
     # 引入clip后，自构造text的输入
     text_inputs = clip_pre_text(cfg)  # 65*77
@@ -403,24 +394,14 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
     netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
     netC = network.feat_classifier(type='wn', class_num=cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
 
-    # 加载预训练负向嵌入，替代可学习隐藏类
-    neg_embed = None
-    neg_path = osp.join(cfg.output_dir_src, f"learned_neg_{cfg.domain[cfg.SETTING.S]}.pt")
-    if osp.exists(neg_path):
-        ckpt = torch.load(neg_path, map_location='cpu')
-        neg_embed = ckpt['neg_embed'].cuda()
-        cfg.class_num_hidden = neg_embed.shape[0]
-        print(f"加载预训练负向嵌入: {cfg.class_num_hidden} 类, 路径: {neg_path}")
-    else:
-        print(f"警告: 未找到负向嵌入文件 {neg_path}, 跳过负类原型")
-        cfg.class_num_hidden = 0
+   
 
     netC_aux = network.feat_classifier(type='wn', class_num=cfg.class_num + cfg.class_num_hidden, bottleneck_dim=cfg.bottleneck).cuda()
       # 提取用source数据训练出的模型
    
     
     modelpath = cfg.output_dir_src + '/source_F.pt'
-    netF.load_state_dict(torch.load(modelpath),strict=True)
+    netF.load_state_dict(torch.load(modelpath),strict=True) # type: ignore
     modelpath = cfg.output_dir_src + '/source_B.pt'
     netB.load_state_dict(torch.load(modelpath),strict=True)
     modelpath = cfg.output_dir_src + '/source_C.pt'
@@ -780,147 +761,14 @@ def train_target(cfg,beta_pre_1 =1,beta_pre_2 = 0.1,use_iid = True,use_cls = Tru
                     
             logger.info(log_str)
 
-            # Bridge 实验：保存预测矩阵供事后机制分析
-            if getattr(cfg.BRIDGE, 'ENABLE', False) and iter_num % (interval_iter * getattr(cfg.BRIDGE, 'CP_INTERVAL', 1)) == 0:
-                save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
-                                       clip_model, text_features, text_inputs, mypromt,
-                                       iter_num, epoch_num)
-
+           
             netF.train()
             netB.train()
-    from datetime import datetime
-    time_now = datetime.now()
-
-    if False:
-        acc_str = f"{acc:.2f}"  # 将 float 转为字符串，并限制小数位
-
-        torch.save(
-            netF.state_dict(),
-            osp.join(cfg.output_dir,
-                    "target_F_{}_{}_acc={}_{}.pt".format(cfg.savename, cfg.name, acc_str, time_now))
-        )
-
-        torch.save(
-            netB.state_dict(),
-            osp.join(cfg.output_dir,
-                    "target_B_{}_{}_acc={}_{}.pt".format(cfg.savename, cfg.name, acc_str, time_now))
-        )
-
-        torch.save(
-            netC.state_dict(),
-            osp.join(cfg.output_dir,
-                    "target_C_{}_{}_acc={}_{}.pt".format(cfg.savename, cfg.name, acc_str, time_now))
-        )
-
-        torch.save(
-            netC_aux.state_dict(),
-            osp.join(cfg.output_dir,
-                    "target_C_aux_{}_{}_acc={}_{}.pt".format(cfg.savename, cfg.name, acc_str, time_now))
-        )
-        torch.save(
-            mypromt.prompt_learner.state_dict(),
-            osp.join(cfg.output_dir,
-                    "CLIP_{}_{}_acc={}_{}.pt".format(cfg.savename, cfg.name, acc_str, time_now))
-        )
 
     return netF, netB, netC
 
 
-def save_bridge_checkpoint(cfg, dset_loaders, netF, netB, netC, netC_aux,
-                           clip_model, text_features, text_inputs, mypromt,
-                           iter_num, epoch_num):
-    """保存 bridge 分析所需预测矩阵——事后用标签做机制验证，训练时不使用标签"""
-    save_dir = osp.join(cfg.output_dir, getattr(cfg.BRIDGE, 'SAVE_DIR', 'bridge_ckpts'))
-    os.makedirs(save_dir, exist_ok=True)
 
-    netF_eval = netF.training
-    netB_eval = netB.training
-    if netF_eval:
-        netF.eval()
-    if netB_eval:
-        netB.eval()
-    netC.eval()
-
-    all_P_c = []
-    all_P_tgt = []
-    all_labels = []
-    all_inputs = []
-    all_inputs_clip = []
-
-    with torch.no_grad():
-        for data in dset_loaders["clip_test"]:
-            inputs, inputs_clip, labels = data[0][0], data[0][1], data[1]
-            inputs, inputs_clip = inputs.cuda(), inputs_clip.cuda()
-
-            feats = netB(netF(inputs))
-            logits_c = netC(feats)[:, :cfg.class_num]
-            P_c = nn.Softmax(dim=1)(logits_c)
-
-            _, txt_feat = mypromt(inputs_clip)
-            logits_clip = clip_text(clip_model, txt_feat, inputs_clip)
-            P_tgt = nn.Softmax(dim=1)(logits_clip[:, :cfg.class_num])
-
-            all_P_c.append(P_c.cpu())
-            all_P_tgt.append(P_tgt.cpu())
-            all_labels.append(labels)
-            all_inputs.append(inputs.cpu())
-            all_inputs_clip.append(inputs_clip.cpu())
-
-    P_c = torch.cat(all_P_c, dim=0)
-    P_tgt = torch.cat(all_P_tgt, dim=0)
-    Y = torch.cat(all_labels, dim=0)
-    X_base = torch.cat(all_inputs, dim=0)
-    X_clip = torch.cat(all_inputs_clip, dim=0)
-
-    Y_onehot = torch.zeros_like(P_c).scatter(1, Y.long().unsqueeze(1), 1)
-    brier_c = ((Y_onehot - P_c) ** 2).mean().item()
-    brier_tgt = ((Y_onehot - P_tgt) ** 2).mean().item()
-    G_norm_sq = ((P_tgt - P_c) ** 2).mean().item()
-
-    acc_c = float((P_c.argmax(1) == Y).float().mean().item() * 100)
-    acc_tgt = float((P_tgt.argmax(1) == Y).float().mean().item() * 100)
-
-    ckpt = {
-        'iter': iter_num,
-        'epoch': epoch_num,
-        'P_c': P_c,
-        'P_tgt': P_tgt,
-        'labels': Y,
-        'brier_c': brier_c,
-        'brier_tgt': brier_tgt,
-        'G_norm_sq': G_norm_sq,
-        'acc_c': acc_c,
-        'acc_tgt': acc_tgt,
-    }
-
-    # NTK 方法 B: 保存模型权重 + 采样子集图像供 Jacobian 计算
-    if getattr(cfg.BRIDGE, 'SAVE_MODEL', False):
-        ckpt['netF_state'] = {k: v.cpu() for k, v in netF.state_dict().items()}
-        ckpt['netB_state'] = {k: v.cpu() for k, v in netB.state_dict().items()}
-        ckpt['netC_state'] = {k: v.cpu() for k, v in netC.state_dict().items()}
-        # 保存少量图像供 NTK 计算用（从已收集数据中截取）
-        ntk_n = getattr(cfg.BRIDGE, 'NTK_SAMPLES', 10) * cfg.class_num
-        ntk_n = min(ntk_n, X_base.shape[0])
-        ckpt['ntk_inputs'] = X_base[:ntk_n]
-        ckpt['ntk_inputs_clip'] = X_clip[:ntk_n]
-        ckpt['ntk_labels'] = Y[:ntk_n]
-        ckpt['arch'] = cfg.MODEL.ARCH
-
-    ckpt_path = osp.join(save_dir, f'bridge_{iter_num:06d}.pt')
-    torch.save(ckpt, ckpt_path)
-    logger.info(f'Bridge ckpt saved: {ckpt_path}')
-
-    if netF_eval:
-        netF.train()
-    if netB_eval:
-        netB.train()
-
-
-def print_cfg(cfg):
-    s = "==========================================\n"
-    for arg, content in cfg.__dict__.items():
-        s += "{}:{}\n".format(arg, content)
-    return s
 
 def clip_pre_text(cfg):
     #M = cfg.class_num_hidden
@@ -939,11 +787,3 @@ def clip_pre_text(cfg):
     return tokenized_prompts
 
 
-def clip_text(model, text_features, inputs_test):
-    with torch.no_grad():
-        image_features = model.encode_image(inputs_test)
-    logit_scale = model.logit_scale.data
-    logit_scale = logit_scale.exp()
-    image_features = image_features / image_features.norm(dim=1, keepdim=True)
-    logits = logit_scale * image_features @ text_features.t()
-    return logits
