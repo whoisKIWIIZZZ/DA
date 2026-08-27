@@ -762,13 +762,13 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
         optimizer.zero_grad()
         opt_C.zero_grad()
-        opt_aux.zero_grad()
+       
         total_loss = classifier_loss + loss_iid - cfg.DIFF_ALIGN.GENT_PAR * gentropy_loss + cfg.DIFF_ALIGN.LENT_PAR * loss_ent
         total_loss.backward()
         optimizer.step()
         
         opt_C.step()
-        opt_aux.step()
+       
         if use_clip:
             if iter_num <  (max_iter/2):
                 with torch.no_grad():
