@@ -680,10 +680,10 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         dd = np.expand_dims(dd,axis=1)
         dd = torch.from_numpy(dd)
         dd[dd>1]=1
-        x_used = False 
+        x_used = True
 
-        d = alpha.unsqueeze(1)  if x_used else dd
-        predict_mix = alpha.unsqueeze(1) * q_target + (1.0 - alpha.unsqueeze(1)) * q_clip
+        dw = alpha.unsqueeze(1)  if x_used else dd
+        predict_mix = dw * q_target + (1.0 - dw) * q_clip
 
         has_selected_samples = indices_greater.numel() > 0
         if cfg.DIFF_ALIGN.CLS_PAR > 0 and use_cls and has_selected_samples:
