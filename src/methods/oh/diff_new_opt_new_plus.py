@@ -680,7 +680,8 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         dd = np.expand_dims(dd,axis=1)
         dd = torch.from_numpy(dd)
         dd[dd>1]=1
-        x_used = True
+        x_used = False 
+
         d = alpha.unsqueeze(1)  if x_used else dd
         predict_mix = alpha.unsqueeze(1) * q_target + (1.0 - alpha.unsqueeze(1)) * q_clip
 
