@@ -676,6 +676,12 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
                 cfg
             )
         )
+        dd =np.random.exponential(scale = ((iter_num/max_iter)+0.1),size = softmax_out.shape[0]) 
+        dd = np.expand_dims(dd,axis=1)
+        dd = torch.from_numpy(dd)
+        dd[dd>1]=1
+        x_used = True
+        d = alpha.unsqueeze(1)  if x_used else dd
         predict_mix = alpha.unsqueeze(1) * q_target + (1.0 - alpha.unsqueeze(1)) * q_clip
 
         has_selected_samples = indices_greater.numel() > 0
@@ -687,20 +693,11 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         else:
             classifier_loss = base_outputs_test.new_zeros(())
 
-        warmup_iter = 80
-        neg_iter = 100
-        bb = 1 - current_aux
-        nnn = 1 - current_aux if iter_num > neg_iter else 0.01
-        bn = -0.3
+
         if use_iid and has_selected_samples:
-            loss_iid, loss_mat = IID_losses.IID_loss(
-                cfg.class_num,
-                softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
+            loss_iid, loss_mat = IID_losses.IID_loss_old(
+                softmax_out[indices_greater].detach(),
                 clip_all_output[indices_greater],
-                bb,
-                nnn,
-                bn,
-                lamb=1.0
             )
         else:
             loss_iid = base_outputs_test.new_zeros(())
