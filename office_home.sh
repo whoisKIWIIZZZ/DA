@@ -3,14 +3,14 @@ DATASET="office-home" # imagenet_c domainnet126 office-home
 METHOD="diff_align"          # shot nrc plue difo source-neg source_clip
 BRIDGE_MODE=false             # true=启用bridge实验checkpoint保存
 
-
+#export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD
 echo BRIDGE_MODE: $BRIDGE_MODE
 
 # 域索引→缩写映射 (Art/Clipart/Product/RealWorld → A/C/P/R)
 domain_abbr=(A C P R)
-PYTHON=/data02/home/scv8780/.conda/envs/sfa/bin/python
+PYTHON=/home/yishouzhuo/miniconda3/envs/sfa/bin/python
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
@@ -29,10 +29,10 @@ for s in ${s_list[*]}; do
         if $BRIDGE_MODE; then
             CUDA_VISIBLE_DEVICES=0 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
                 SETTING.S "$s" SETTING.T "$t" \
-                BRIDGE.ENABLE True &
+                BRIDGE.ENABLE True 
         else
-            CUDA_VISIBLE_DEVICES=0 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
-                SETTING.S "$s" SETTING.T "$t" &
+            CUDA_VISIBLE_DEVICES=1 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
+                SETTING.S "$s" SETTING.T "$t" 
         fi
         wait
 

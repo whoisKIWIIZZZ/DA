@@ -1,0 +1,38 @@
+MODEL:
+  ARCH: resnet50
+  METHOD: diff_align
+SETTING:
+  DATASET: office-home
+  S: 0
+  T: 2
+  SEED: 2020
+  OUTPUT_SRC: source
+OPTIM:
+  METHOD: SGD
+  MOMENTUM: 0.9
+  LR: 0.01
+  WD: 1e-3
+  NESTEROV: TRUE
+TEST:
+  BATCH_SIZE: 64
+  MAX_EPOCH: 45
+  INTERVAL: 30
+DIFF_ALIGN:
+  CLS_PAR: 0.4
+  EPSILON : 1e-5
+  GENT_PAR: 1.0
+  ARCH : ViT-B/32 #RN50,RN50x4,RN50x16,RN101,RN50x64,ViT-B/32,ViT-B/16,ViT-L/14
+  TTA_STEPS : 1
+  CTX_INIT : a_photo_of_a
+  N_CTX : 4
+  LOAD : None
+  IIC_PAR: 1.0
+  USE_NEG: True
+  LENT_PAR : 0.05
+  MERGE_ADAPTIVE: False  # True=自适应融合, False=固定scale=0.1(同difo_plus)
+BRIDGE:
+  ENABLE: True
+  CP_INTERVAL: 1
+  SAVE_DIR: bridge_ckpts
+  SAVE_MODEL: True
+  NTK_SAMPLES: 10

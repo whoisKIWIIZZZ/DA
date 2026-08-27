@@ -331,7 +331,7 @@ def train_target(cfg):
     init_negative_with_mean(mypromt)
     state_neg = torch.load(
         #osp.join(cfg.output_dir_src, "source_prompt_learner_dual_kl_neg.pt"),
-        osp.join("/data/home/scv8780/run/sfda-my/Models/source/uda/office-home/P", "source_prompt_learner_dual_kl_neg.pt"),
+        osp.join("/home/yishouzhuo/work/sfda/Models/source/uda/office-home/P", "source_prompt_learner_dual_kl_neg.pt"),
         map_location="cuda"
     )
 

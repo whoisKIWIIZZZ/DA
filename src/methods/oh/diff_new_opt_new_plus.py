@@ -678,10 +678,20 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         )
         dd =np.random.exponential(scale = ((iter_num/max_iter)+0.1),size = softmax_out.shape[0]) 
         dd = np.expand_dims(dd,axis=1)
-        dd = torch.from_numpy(dd)
+        dd = torch.from_numpy(dd).to(device=q_target.device, dtype=q_target.dtype)
         dd[dd>1]=1
         x_used = True
 
+        _, predict = torch.max(base_softmax_out, 1)  # 从bank来的
+        _, clip_predict = torch.max(base_clip_all_output, 1)  # 从test clip来
+
+        K=cfg.class_num
+        predict_one = F.one_hot(predict, num_classes=K).to(
+            device=q_target.device, dtype=q_target.dtype
+        )
+        clip_one = F.one_hot(clip_predict, num_classes=K).to(
+            device=q_target.device, dtype=q_target.dtype
+        )
         dw = alpha.unsqueeze(1)  if x_used else dd
         predict_mix = dw * q_target + (1.0 - dw) * q_clip
 
@@ -696,10 +706,11 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
 
         if use_iid and has_selected_samples:
-            loss_iid, loss_mat = IID_losses.IID_loss_old(
+            loss_iid = IID_losses.IID_loss_old(
                 softmax_out[indices_greater].detach(),
                 clip_all_output[indices_greater],
             )
+            loss_mat = None
         else:
             loss_iid = base_outputs_test.new_zeros(())
             loss_mat = None
@@ -794,5 +805,3 @@ def clip_pre_text(cfg):
     tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts]).cuda()  # 把text变为数字信息
 
     return tokenized_prompts
-
-
