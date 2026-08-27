@@ -131,47 +131,9 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction, clip
         target_disagreement_acc, clip_disagreement_acc, selected_disagreement_acc,
         target_only_alpha, clip_only_alpha, both_low
     )
-#初始化
-def copy_netC(netC,netC_aux,num_known_classes):
-    state_dict_C = netC.state_dict()
-    state_dict_C_aux = netC_aux.state_dict()
 
-    for key in state_dict_C.keys():
-        if key in state_dict_C_aux:
-            # 假设参数形状是 [num_classes, ...]，我们只复制前 num_known_classes 行/元素
-            # 检查是否是权重或偏置相关的键，并且其第一个维度对应类别数
-            if state_dict_C[key].shape[0] == num_known_classes and state_dict_C_aux[key].shape[0] > num_known_classes:
-                # 复制前 num_known_classes 行/元素
-                state_dict_C_aux[key][:num_known_classes] = state_dict_C[key].clone() # 使用 clone() 是好习惯
-            elif state_dict_C[key].shape[0] == num_known_classes and state_dict_C_aux[key].shape[0] == num_known_classes:
-                # 如果形状完全一样，直接复制整个张量 (例如，如果 netC_aux 只有 known classes)
-                state_dict_C_aux[key] = state_dict_C[key].clone()
-    
-    netC_aux.load_state_dict(state_dict_C_aux, strict=False)
 
-def copy_back_netC(netC, netC_aux, num_known_classes):
-    """
-    Copies parameters from netC_aux back to netC.
-    Specifically targets the first 'num_known_classes' indices for classification layers.
-    """
-    state_dict_C = netC.state_dict()
-    state_dict_C_aux = netC_aux.state_dict()
 
-    for key in state_dict_C.keys():
-        if key in state_dict_C_aux:
-            # Check if the parameter in netC matches the expected size for known classes
-            if state_dict_C[key].shape[0] == num_known_classes:
-                
-                # Case 1: The aux network has more classes (slicing needed)
-                if state_dict_C_aux[key].shape[0] >= num_known_classes:
-                    state_dict_C[key] = state_dict_C_aux[key][:num_known_classes].clone()
-                
-                # Case 2: The shapes already match perfectly
-                else:
-                    state_dict_C[key] = state_dict_C_aux[key].clone()
-
-    # Load the updated state_dict back into netC
-    netC.load_state_dict(state_dict_C, strict=False)
 
 def print_grad_hook(grad):
     if grad.norm().item() > 100:
@@ -797,10 +759,10 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
                # wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, False)
-                acc_s_te_aux, _ = cal_acc(dset_loaders['test'], netF, netB, netC_aux,cfg, False)
+               
                 neg_str = ''
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={}{}'.format(cfg.name, iter_num, max_iter,
-                                                                                     acc_s_te,acc_s_te_aux,
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}{}'.format(cfg.name, iter_num, max_iter,
+                                                                                     acc_s_te,
                                                                                      total_loss, neg_str)
 
                 if iter_num == max_iter:
