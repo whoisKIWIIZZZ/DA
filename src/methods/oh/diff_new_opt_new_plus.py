@@ -50,9 +50,7 @@ def adaptive_mix_weight(q_target, q_clip, target_output, clip_history, clip_hist
     target_reliability = (
         confidence_weight * target_confidence + stability_weight * target_stability
     ) / weight_sum
-    clip_reliability = (
-        confidence_weight * clip_confidence + stability_weight * clip_stability
-    ) / weight_sum
+    clip_reliability = clip_confidence
 
     initial_target_weight = cfg.DIFF_ALIGN.MERGE_INITIAL_TARGET_WEIGHT
     initial_logit = np.log(initial_target_weight / (1.0 - initial_target_weight))
@@ -65,9 +63,12 @@ def adaptive_mix_weight(q_target, q_clip, target_output, clip_history, clip_hist
     min_weight = cfg.DIFF_ALIGN.MERGE_MIN_WEIGHT
     prior = torch.sigmoid(prior_logit).clamp(min_weight, 1.0 - min_weight)
 
+    loss_gap = clip_loss.detach() - target_loss.detach()
+    loss_scale = loss_gap.abs().median().clamp_min(1e-3)
+    normalized_loss_gap = (loss_gap / loss_scale).clamp(-3.0, 3.0)
     robust_logit = torch.logit(prior) + (
-        target_loss.detach() - clip_loss.detach()
-    ) / cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE
+        normalized_loss_gap / cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE
+    )
     alpha = torch.sigmoid(robust_logit).clamp(min_weight, 1.0 - min_weight)
     return (
         alpha.detach(), prior.detach(), target_confidence.detach(), clip_confidence.detach(),
@@ -516,7 +517,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
     if cfg.SETTING.DATASET == 'office-home':
         
-        max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])*2  
+        max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"]) 
         interval_iter = max_iter  // cfg.TEST.INTERVAL  
         copy_iter = max_iter  //15// cfg.TEST.INTERVAL  
     else:
@@ -535,7 +536,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
     mypromt = promote_learning_diff_promote_learning(cfg, clip_model).to(clip_model.visual.conv1.weight.device)
     gate_log_str = 'Gate: no observations'
-    # modelpath = "/data02/home/scv8780/run/sfda-my/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
+    # modelpath = "/home/yishouzhuo/work/sfda/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
     # mypromt.prompt_learner.load_state_dict(torch.load(modelpath))
    # mypromt.prompt_learner.ctx.register_hook(print_grad_hook)
     while iter_num < max_iter:
@@ -676,24 +677,10 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
                 cfg
             )
         )
-        dd =np.random.exponential(scale = ((iter_num/max_iter)+0.1),size = softmax_out.shape[0]) 
-        dd = np.expand_dims(dd,axis=1)
-        dd = torch.from_numpy(dd).to(device=q_target.device, dtype=q_target.dtype)
-        dd[dd>1]=1
-        x_used = True
-
-        _, predict = torch.max(base_softmax_out, 1)  # 从bank来的
-        _, clip_predict = torch.max(base_clip_all_output, 1)  # 从test clip来
-
-        K=cfg.class_num
-        predict_one = F.one_hot(predict, num_classes=K).to(
-            device=q_target.device, dtype=q_target.dtype
+        predict_mix = (
+            alpha.unsqueeze(1) * q_target
+            + (1.0 - alpha.unsqueeze(1)) * q_clip
         )
-        clip_one = F.one_hot(clip_predict, num_classes=K).to(
-            device=q_target.device, dtype=q_target.dtype
-        )
-        dw = alpha.unsqueeze(1)  if x_used else dd
-        predict_mix = dw * q_target + (1.0 - dw) * q_clip
 
         has_selected_samples = indices_greater.numel() > 0
         if cfg.DIFF_ALIGN.CLS_PAR > 0 and use_cls and has_selected_samples:
@@ -704,13 +691,21 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         else:
             classifier_loss = base_outputs_test.new_zeros(())
 
-
+        warmup_iter = 80
+        neg_iter = 100
+        bb = 1 - current_aux
+        nnn = 1 - current_aux if iter_num > neg_iter else 0.01
+        bn = -0.3
         if use_iid and has_selected_samples:
-            loss_iid = IID_losses.IID_loss_old(
-                softmax_out[indices_greater].detach(),
+            loss_iid, loss_mat = IID_losses.IID_loss(
+                cfg.class_num,
+                softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
                 clip_all_output[indices_greater],
+                bb,
+                nnn,
+                bn,
+                lamb=1.0
             )
-            loss_mat = None
         else:
             loss_iid = base_outputs_test.new_zeros(())
             loss_mat = None

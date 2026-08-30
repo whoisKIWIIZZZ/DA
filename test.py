@@ -3,7 +3,7 @@ import clip
 from clip import load
 import numpy as np
 # DOWNLOAD_ROOT 保持不变
-DOWNLOAD_ROOT='/data02/home/scv8780/run/sfda-my/clip-module'
+DOWNLOAD_ROOT='/home/yishouzhuo/work/sfda/clip-module'
 
 from PIL import Image
 
@@ -64,4 +64,4 @@ def check_image_match_fixed(image_path):
 
 
 # 注意：请替换成您实际的图片路径
-check_image_match_fixed("/data02/home/scv8780/run/sfda-my/dog.jpeg")
+check_image_match_fixed("/home/yishouzhuo/work/sfda/dog.jpeg")
