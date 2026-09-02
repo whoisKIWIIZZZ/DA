@@ -1,10 +1,9 @@
-#prode_diff.py
+#prode,py
 import os.path as osp
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
 from src.models import network
@@ -14,12 +13,11 @@ from sklearn.metrics import confusion_matrix
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
-from src.methods.oh.source_neg import NegProxyLinear
 logger = logging.getLogger(__name__)
 
 
 
-def data_load(cfg):
+def data_load(cfg): 
     ## prepare data
     dsets = {}
     dset_loaders = {}
@@ -37,10 +35,10 @@ def data_load(cfg):
             reci = rec.strip().split(' ')
             if int(reci[1]) in cfg.tar_classes:
                 if int(reci[1]) in cfg.src_classes:
-                    line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
+                    line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'   
                     new_tar.append(line)
                 else:
-                    line = reci[0] + ' ' + str(len(label_map_s)) + '\n'
+                    line = reci[0] + ' ' + str(len(label_map_s)) + '\n'   
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
@@ -56,6 +54,8 @@ def image_test(resize_size=256, crop_size=224, alexnet=False):
   if not alexnet:
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                    std=[0.229, 0.224, 0.225])
+  #else:
+    #normalize = Normalize(meanfile='./ilsvrc_2012_mean.npy')
   return  transforms.Compose([
         transforms.Resize((resize_size, resize_size)),
         transforms.CenterCrop(crop_size),
@@ -66,6 +66,8 @@ def image_train(resize_size=256, crop_size=224, alexnet=False):
   if not alexnet:
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                    std=[0.229, 0.224, 0.225])
+  #else:
+   # normalize = Normalize(meanfile='./ilsvrc_2012_mean.npy')
   return  transforms.Compose([
         transforms.Resize((resize_size, resize_size)),
         transforms.RandomCrop(crop_size),
@@ -127,39 +129,22 @@ def print_cfg(cfg):
     return s
 
 
-def test_time_tuning(model, inputs, optimizer, cfg, target_output,
-                     neg_proxy, optimizer_proxy):
+def test_time_tuning(model, inputs, optimizer, cfg, target_output):
     target_output = target_output.cuda()
-    target_output = nn.Softmax(dim=1)(target_output)
-
-    with torch.no_grad():
-        feats_clip = model.image_encoder(inputs.type(model.dtype)).float()
-        feats_clip = feats_clip / feats_clip.norm(dim=-1, keepdim=True)
-
+    target_output =  nn.Softmax(dim=1)(target_output)
     for j in range(cfg.ProDe.TTA_STEPS):
         with torch.amp.autocast('cuda'):
-            output_logits, _ = model(inputs)
+            output_logits,_ = model(inputs)             
             output = nn.Softmax(dim=1)(output_logits)
             iic_loss = IID_losses.IID_loss_old(output, target_output)
         optimizer.zero_grad()
         iic_loss.backward()
         optimizer.step()
-
-        neg_logits,_ = neg_proxy(feats_clip)
-        proxy_target = 1.0 - target_output
-        proxy_loss_tta = F.binary_cross_entropy_with_logits(neg_logits, proxy_target)
-        optimizer_proxy.zero_grad()
-        proxy_loss_tta.backward()
-        optimizer_proxy.step()
-
     return output
 
-def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_output,
-                          neg_proxy, optimizer_proxy, optim_state_proxy):
+def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_output):
     optimizer.load_state_dict(optim_state)
-    optimizer_proxy.load_state_dict(optim_state_proxy)
-    output = test_time_tuning(model, input, optimizer, cfg, target_output,
-                               neg_proxy=neg_proxy, optimizer_proxy=optimizer_proxy)
+    output = test_time_tuning(model, input, optimizer, cfg, target_output)
     with torch.no_grad():
         with torch.amp.autocast('cuda'):
             model.eval()
@@ -177,35 +162,17 @@ def train_target(cfg):
     if cfg.MODEL.ARCH[0:3] == 'res':
         netF = network.ResBase(res_name=cfg.MODEL.ARCH).cuda()
     elif cfg.MODEL.ARCH[0:3] == 'vgg':
-        netF = network.VGGBase(vgg_name=cfg.MODEL.ARCH).cuda()
+        netF = network.VGGBase(vgg_name=cfg.MODEL.ARCH).cuda()  
 
     netB = network.feat_bottleneck(type='bn', feature_dim=netF.in_features, bottleneck_dim=cfg.bottleneck).cuda()
     netC = network.feat_classifier(type='wn', class_num = cfg.class_num, bottleneck_dim=cfg.bottleneck).cuda()
 
-    modelpath = cfg.output_dir_src + '/source_F.pt'
+    modelpath = cfg.output_dir_src + '/source_F.pt'   
     netF.load_state_dict(torch.load(modelpath))
-    modelpath = cfg.output_dir_src + '/source_B.pt'
+    modelpath = cfg.output_dir_src + '/source_B.pt'   
     netB.load_state_dict(torch.load(modelpath))
-    modelpath = cfg.output_dir_src + '/source_C.pt'
+    modelpath = cfg.output_dir_src + '/source_C.pt'    
     netC.load_state_dict(torch.load(modelpath))
-
-    # --- NegProxy: learnable negative proxy for CLIP logit correction ---
-    feat_dim_proxy = model.image_encoder.output_dim
-    neg_proxy = NegProxyLinear(feat_dim_proxy, cfg.class_num).cuda()
-    neg_proxy_path = cfg.output_dir_src + '/source_C_aux_neg_head.pt'
-    if osp.exists(neg_proxy_path):
-        neg_proxy.load_state_dict(torch.load(neg_proxy_path))
-        logger.info(f"Loaded negative proxy from {neg_proxy_path}")
-    else:
-        logger.warning(f"Negative proxy not found at {neg_proxy_path}, run source_neg.py first")
-    neg_proxy.train()
-
-    param_group_proxy = [{'params': neg_proxy.parameters(),
-                           'lr': cfg.OPTIM.LR * 0.1}]
-    optimizer_proxy = optim.SGD(param_group_proxy)
-    optimizer_proxy = op_copy(optimizer_proxy)
-    optim_state_proxy = deepcopy(optimizer_proxy.state_dict())
-
     param_group = []
     param_group_ib = []
 
@@ -219,6 +186,12 @@ def train_target(cfg):
             param_group += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY2}]
         else:
             v.requires_grad = False
+    # for k, v in netC.named_parameters():
+    #     if cfg.OPTIM.LR_DECAY1 > 0:
+    #         param_group += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
+    #     else:
+    #         v.requires_grad = False
+    print("now we dont have netC")
     for k, v in model.prompt_learner.named_parameters():
         if(v.requires_grad == True):
             param_group_ib += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
@@ -245,7 +218,7 @@ def train_target(cfg):
             inputs = inputs.cuda()
             output = netB(netF(inputs))
             outputs = netC(output)
-            outputs=nn.Softmax(dim=1)(outputs)
+            #outputs=nn.Softmax(dim=1)(outputs)
             logtis_bank[indx] = outputs.detach().clone()
 
 
@@ -270,28 +243,21 @@ def train_target(cfg):
         with torch.no_grad():
             outputs_test_new = outputs_test.clone().detach()
 
-        inputs_test_clip = inputs_test_augs
-
-        clip_score = test_time_adapt_eval(inputs_test_clip, model, optimizer_ib, optim_state, cfg, outputs_test_new,
-                                           neg_proxy=neg_proxy, optimizer_proxy=optimizer_proxy, optim_state_proxy=optim_state_proxy)
+        clip_score = test_time_adapt_eval(inputs_test_augs, model, optimizer_ib, optim_state, cfg, outputs_test_new)
         clip_score = clip_score.float()
 
         with torch.no_grad():
-            feats_clip = model.image_encoder(inputs_test_clip.type(model.dtype)).float()
-            feats_clip = feats_clip / feats_clip.norm(dim=-1, keepdim=True)
-            neg_logits,_ = neg_proxy(feats_clip)
-            neg_probs = torch.sigmoid(neg_logits)
-            proxy_correction = torch.log((1 - neg_probs) / (neg_probs + 1e-6) + 1e-6)
-
-            clip_pred = clip_score.argmax(dim=1)
-            netc_pred = outputs_test_new.argmax(dim=1)
-            disagree_mask = (netc_pred != clip_pred).float().unsqueeze(1)
-            clip_pred_neg = neg_probs.gather(1, clip_pred.unsqueeze(1))
-            proxy_weight = disagree_mask * clip_pred_neg
-
-            new_clip = (outputs_test_new - logtis_bank[tar_idx].cuda()) + clip_score.cuda() + cfg.ProDe.PROXY_WEIGHT * proxy_weight * proxy_correction
+            new_clip = (outputs_test_new - 0.1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+        #     for name, t in [
+   		#  ("outputs_test_new",   outputs_test_new),
+   		#  ("logits_bank term",   1 * logtis_bank[tar_idx].cuda()),
+    	# 	 ("clip_score",         clip_score.cuda()),
+		# ]:
+        #         print(f"{name:20s} | mean_abs={t.abs().mean():.3e} | max_abs={t.abs().max():.3e}")
+            clip_score_sm = nn.Softmax(dim=1)(new_clip)
+        
+        _,clip_index_new = torch.max(new_clip, 1)
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
-        _, clip_index_new = torch.max(new_clip, 1)
         iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
@@ -310,41 +276,41 @@ def train_target(cfg):
         classifier_loss =  cfg.ProDe.GENT_PAR*entropy_loss + classifier_loss
 
         optimizer.zero_grad()
-        optimizer_ib.zero_grad()
+        #optimizer_ib.zero_grad()
         classifier_loss.backward()
         optimizer.step()
-        optimizer_ib.step()
-
+        #optimizer_ib.step()
+        with torch.no_grad():
+            logtis_bank[tar_idx] = (
+                0.9 * logtis_bank[tar_idx] +
+                0.1 * outputs_test.detach()
+            )
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
-            with torch.no_grad():
-                neg_proxy.eval()
-                sample_neg = neg_probs.gather(1, clip_index_new.unsqueeze(1)).mean()
-                neg_proxy.train()
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; avg_neg_on_pred={:.3f}; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, sample_neg.item(), classifier_loss) + '\n' + acc_list
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%; avg_neg_on_pred={:.3f}; loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te, sample_neg.item(), classifier_loss)
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
 
             logger.info(log_str)
             netF.train()
             netB.train()
             netC.train()
 
-    if cfg.ISSAVE:
+    if cfg.ISSAVE:   
         torch.save(netF.state_dict(), osp.join(cfg.output_dir, "target_F_" + cfg.savename + ".pt"))
         torch.save(netB.state_dict(), osp.join(cfg.output_dir, "target_B_" + cfg.savename + ".pt"))
         torch.save(netC.state_dict(), osp.join(cfg.output_dir, "target_C_" + cfg.savename + ".pt"))
-
+        
     return netF, netB, netC
 
 
 def print_cfg(cfg):
-    s = "==========================================\n"
+    s = "==========================================\n"    
     for arg, content in cfg.__dict__.items():
         s += "{}:{}\n".format(arg, content)
     return s

@@ -292,6 +292,7 @@ _C.DIFF_ALIGN.MERGE_GATE_TEMPERATURE = 0.25
 _C.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE = 5.0  # 越大越接近可靠性 prior
 _C.DIFF_ALIGN.MERGE_MIN_WEIGHT = 0.05
 _C.DIFF_ALIGN.MERGE_LOW_CONFIDENCE = 0.3  # 仅用于日志诊断
+_C.DIFF_ALIGN.MERGE_TARGET_EMA_DECAY = 0.9
 
 # --------------------------------- BRIDGE options ----------------------------- #
 _C.BRIDGE = CfgNode()

@@ -15,7 +15,7 @@ PYTHON=/home/yishouzhuo/miniconda3/envs/sfa/bin/python
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
 s_list=(0 1 2 3)
-t_list=(3 2 1 0)
+t_list=(0 1 2 3)
 # fji
 for s in ${s_list[*]}; do
     for t in ${t_list[*]}; do

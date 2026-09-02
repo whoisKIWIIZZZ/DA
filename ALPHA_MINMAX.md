@@ -109,7 +109,23 @@ $$
 
 所以实现难度只是在pi那一块.
 
+## pi如何实现
+一个简单的思路是,$\pi_i = \Gamma_{target} - \Gamma_{CLIP}$,其中$\Gamma$是某种统计量.
+利用score bank,考虑[JS散度](https://www.bohrium.com/sciencepedia/feynman/keyword/jensen_shannon_divergence),
+$$
+\Gamma  = \frac15\big(1-\frac{H(p_\theta (x_i))}{\log N}\big) + \frac45 (1 - \frac{\text{JSD}(p_\theta (x_i),q)}{\log 2})
+$$
+q是score bank,p表示模型forward一次拿到的logits,使用JSD是考虑到KL有方向性.第一项是衡量这个东西是不是one-hot分布.第二项是考虑模型的预测有没有发生剧烈的变动.
 
+注意:
+- 针对CLIP,约束前者并没有太大的意义,在实现上,$\Gamma_{CLIP}$并没有第一项;;
+- 如果$\pi_i = \Gamma_{target} - \Gamma_{CLIP}$这么定义,很难在一开始的时候保证$\alpha$ 的权重小.所以粗暴地加了一个$-e^{-n/2}$,n表示模型在这个样本上被更新的次数,例如第一次、第二次我们还是更相信CLIP而不是source的logits.之前那个acc截图的实现如下.
+$$
+\pi_i = \Gamma_{target} - \Gamma_{CLIP} - e^{-n_i/2}
+$$
+- officehome的某些case,删掉$-e^{-n/2}$没啥影响.但是office31这个数据集有很大的问题,也许是lr的问题,但更多的问题是我们必须长时间信任source,这是与调度想得到的结果背道而驰的(所以DIFO的结果是最好的,比ProDe都好,就因为他是0.1随机取样).officehome有一些大准确率的case删掉后也会掉点这样,但大体来说还好.
+- 必须保持15epoch训练.之前汇报过到A域的掉精度问题,发现是简单的欠训练导致的,但是其他case不能double到30epoch,不然会出问题.
+- 想起来了
 
 <!-- 
 这样 alpha 只能在可靠性先验附近进行小幅修正,不能因单个 batch 的损失差异而剧烈跳变.

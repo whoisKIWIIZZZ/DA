@@ -36,7 +36,7 @@ def js_stability(first, second):
     return (1.0 - 0.5 * (first_kl + second_kl) / np.log(2.0)).clamp(0.0, 1.0)
 
 
-def adaptive_mix_weight(q_target, q_clip, target_output, clip_history, clip_history_seen,
+def adaptive_mix_weight(i,mi,q_target, q_clip, target_output, clip_history, clip_history_seen,
                         observation_count, target_loss, clip_loss, cfg):
     target_confidence = normalized_confidence(q_target)
     clip_confidence = normalized_confidence(q_clip)
@@ -57,28 +57,39 @@ def adaptive_mix_weight(q_target, q_clip, target_output, clip_history, clip_hist
     prior_bias = initial_logit * torch.exp(
         -observation_count / cfg.DIFF_ALIGN.MERGE_PRIOR_DECAY
     )
+    prior_bias = 0 # lets clean that logic
     prior_logit = prior_bias + (
         target_reliability - clip_reliability
-    ) / cfg.DIFF_ALIGN.MERGE_GATE_TEMPERATURE
+    ) #/ cfg.DIFF_ALIGN.MERGE_GATE_TEMPERATURE 
     min_weight = cfg.DIFF_ALIGN.MERGE_MIN_WEIGHT
     prior = torch.sigmoid(prior_logit).clamp(min_weight, 1.0 - min_weight)
 
     loss_gap = clip_loss.detach() - target_loss.detach()
     loss_scale = loss_gap.abs().median().clamp_min(1e-3)
-    normalized_loss_gap = (loss_gap / loss_scale).clamp(-3.0, 3.0)
-    robust_logit = torch.logit(prior) + (
+    normalized_loss_gap = (loss_gap).clamp(-5.0, 5.0)
+    all_logit = (prior_logit+ normalized_loss_gap) / 5
+    alpha = torch.sigmoid(all_logit).clamp(min_weight, 1.0 - min_weight)
+    prior_term = prior_bias#.detach()
+    reliability_term = (
+        (target_reliability - clip_reliability)
+        / cfg.DIFF_ALIGN.MERGE_GATE_TEMPERATURE
+    ).detach()
+    loss_term = (
         normalized_loss_gap / cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE
-    )
-    alpha = torch.sigmoid(robust_logit).clamp(min_weight, 1.0 - min_weight)
+    ).detach()
     return (
         alpha.detach(), prior.detach(), target_confidence.detach(), clip_confidence.detach(),
-        target_stability.detach(), clip_stability.detach()
+        target_stability.detach(), clip_stability.detach(), prior_term,
+        reliability_term, loss_term, loss_gap.detach(), observation_count.detach(),
+        target_loss.detach(), clip_loss.detach()
     )
 
 
 def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction, clip_prediction,
                      label_bank, target_confidence, clip_confidence, target_stability,
-                     clip_stability, cfg):
+                     clip_stability, prior_term_bank, reliability_term_bank,
+                     loss_term_bank, loss_gap_bank, target_loss_bank, clip_loss_bank,
+                     observation_count_bank, cfg):
     valid = alpha_seen & (label_bank >= 0) & (target_prediction >= 0) & (clip_prediction >= 0)
     if not valid.any():
         return 'Gate: no observations'
@@ -117,12 +128,40 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction, clip
     saturated_low = (alpha <= min_weight + 1e-6).float().mean().item() * 100
     saturated_high = (alpha >= 1.0 - min_weight - 1e-6).float().mean().item() * 100
 
+    prior_term = prior_term_bank[valid]
+    reliability_term = reliability_term_bank[valid]
+    loss_term = loss_term_bank[valid]
+    loss_gap = loss_gap_bank[valid]
+    target_loss = target_loss_bank[valid]
+    clip_loss = clip_loss_bank[valid]
+    observation_count = observation_count_bank[valid]
+
+    def summary(values):
+        quantile_values = torch.quantile(
+            values,
+            torch.tensor([0.1, 0.5, 0.9], device=values.device)
+        )
+        return values.mean().item(), quantile_values[0].item(), quantile_values[1].item(), quantile_values[2].item()
+
+    prior_stats = summary(prior_term)
+    reliability_stats = summary(reliability_term)
+    loss_stats = summary(loss_term)
+    gap_stats = summary(loss_gap)
+    target_loss_stats = summary(target_loss)
+    clip_loss_stats = summary(clip_loss)
+    observation_stats = summary(observation_count)
+    loss_saturated = (loss_term.abs() >= 1.0 - 1e-6).float().mean().item() * 100
+
     return (
         'Gate: n={}; alpha mean={:.3f}, p10/50/90={:.3f}/{:.3f}/{:.3f}; prior={:.3f}; '
         'conf target/clip={:.3f}/{:.3f}; stability target/clip={:.3f}/{:.3f}; '
         'sat low/high={:.1f}%/{:.1f}%; disagree={:.1f}%; '
         'disagree acc target/clip/selected={:.2f}%/{:.2f}%/{:.2f}%; '
-        'oracle alpha target-only/clip-only={:.3f}/{:.3f}; both-low-conf={:.1f}%'
+        'oracle alpha target-only/clip-only={:.3f}/{:.3f}; both-low-conf={:.1f}%; '
+        'terms prior/reliability/loss mean={:.3f}/{:.3f}/{:.3f}; '
+        'terms p50={:.3f}/{:.3f}/{:.3f}; p90={:.3f}/{:.3f}/{:.3f}; '
+        'loss sat={:.1f}%; gap mean/p50={:.4f}/{:.4f}; obs mean/p50={:.1f}/{:.1f}'
+        '; scores targetCE/clipCE mean={:.3f}/{:.3f}; p50={:.3f}/{:.3f}'
     ).format(
         alpha.numel(), alpha.mean().item(), quantiles[0].item(), quantiles[1].item(),
         quantiles[2].item(), prior_bank[valid].mean().item(),
@@ -130,7 +169,12 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction, clip
         target_stability[valid].mean().item(), clip_stability[valid].mean().item(),
         saturated_low, saturated_high, disagreement.float().mean().item() * 100,
         target_disagreement_acc, clip_disagreement_acc, selected_disagreement_acc,
-        target_only_alpha, clip_only_alpha, both_low
+        target_only_alpha, clip_only_alpha, both_low,
+        prior_stats[0], reliability_stats[0], loss_stats[0],
+        prior_stats[2], reliability_stats[2], loss_stats[2],
+        prior_stats[3], reliability_stats[3], loss_stats[3], loss_saturated,
+        gap_stats[0], gap_stats[2], observation_stats[0], observation_stats[2]
+        , target_loss_stats[0], clip_loss_stats[0], target_loss_stats[2], clip_loss_stats[2]
     )
 
 
@@ -179,6 +223,19 @@ def data_load(cfg,preprocess):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
+    target_records = [line.strip().split() for line in txt_tar if line.strip()]
+    target_paths = [record[0] for record in target_records]
+    target_labels = [int(record[1]) for record in target_records]
+    label_counts = np.bincount(target_labels, minlength=cfg.class_num)
+    missing_paths = sum(not osp.exists(path) for path in target_paths)
+    duplicate_paths = len(target_paths) - len(set(target_paths))
+    logger.info(
+        'Data: target=%s n=%d classes=%d label_range=%d..%d '
+        'per_class=%d..%d missing=%d duplicate=%d',
+        cfg.domain[cfg.SETTING.T], len(target_records),
+        int(np.count_nonzero(label_counts)), min(target_labels), max(target_labels),
+        int(label_counts.min()), int(label_counts.max()), missing_paths, duplicate_paths
+    )
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS,
                                         drop_last=False)
@@ -419,7 +476,8 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         "merge initial target weight:", cfg.DIFF_ALIGN.MERGE_INITIAL_TARGET_WEIGHT,
         "confidence/stability:", cfg.DIFF_ALIGN.MERGE_CONFIDENCE_WEIGHT,
         cfg.DIFF_ALIGN.MERGE_STABILITY_WEIGHT,
-        "robust temperature:", cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE
+        "robust temperature:", cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE,
+        "target EMA decay:", cfg.DIFF_ALIGN.MERGE_TARGET_EMA_DECAY
     )
     # clip模型参数初始化
     clip_model, preprocess, _ = clip.load(cfg.DIFF_ALIGN.ARCH)  # type: ignore # vit-B32
@@ -485,6 +543,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
     num_sample = len(loader.dataset)
     # score_bank包含所有样本
     score_bank = torch.randn(num_sample, cfg.class_num).cuda()  # 4365目标样本,65类
+    target_ema_decay = cfg.DIFF_ALIGN.MERGE_TARGET_EMA_DECAY
     source_score_bank = torch.zeros(num_sample).cuda()
     clip_score_bank = torch.zeros(num_sample, cfg.class_num).cuda()
     clip_score_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
@@ -496,6 +555,12 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
     prior_bank = torch.zeros(num_sample, device=score_bank.device)
     target_stability_bank = torch.zeros(num_sample, device=score_bank.device)
     clip_stability_bank = torch.zeros(num_sample, device=score_bank.device)
+    prior_term_bank = torch.zeros(num_sample, device=score_bank.device)
+    reliability_term_bank = torch.zeros(num_sample, device=score_bank.device)
+    loss_term_bank = torch.zeros(num_sample, device=score_bank.device)
+    loss_gap_bank = torch.zeros(num_sample, device=score_bank.device)
+    target_loss_bank = torch.zeros(num_sample, device=score_bank.device)
+    clip_loss_bank = torch.zeros(num_sample, device=score_bank.device)
     target_score_bank = torch.zeros(num_sample, device=score_bank.device)
     netF.eval()
     netB.eval()
@@ -517,7 +582,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
     if cfg.SETTING.DATASET == 'office-home':
         
-        max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"]) 
+        max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"]) #*2
         interval_iter = max_iter  // cfg.TEST.INTERVAL  
         copy_iter = max_iter  //15// cfg.TEST.INTERVAL  
     else:
@@ -536,6 +601,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
     mypromt = promote_learning_diff_promote_learning(cfg, clip_model).to(clip_model.visual.conv1.weight.device)
     gate_log_str = 'Gate: no observations'
+    schedule_log_str = 'Schedule: no observations'
     # modelpath = "/home/yishouzhuo/work/sfda/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
     # mypromt.prompt_learner.load_state_dict(torch.load(modelpath))
    # mypromt.prompt_learner.ctx.register_hook(print_grad_hook)
@@ -586,7 +652,9 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
             gate_log_str = gate_diagnostics(
                 alpha_bank, alpha_seen, prior_bank, target_prediction_bank,
                 clip_prediction_bank, eval_label_bank, target_confidence_bank,
-                clip_confidence_bank, target_stability_bank, clip_stability_bank, cfg
+                clip_confidence_bank, target_stability_bank, clip_stability_bank,
+                prior_term_bank, reliability_term_bank, loss_term_bank, loss_gap_bank,
+                target_loss_bank, clip_loss_bank, gate_observation_bank, cfg
             )
             netF.train()
             netB.train()
@@ -664,8 +732,13 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         log_prob = F.log_softmax(base_outputs_test, dim=1)
         target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
         clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
-        alpha, prior, target_confidence, clip_confidence, target_stability, clip_stability = (
+        (
+            alpha, prior, target_confidence, clip_confidence, target_stability,
+            clip_stability, prior_term, reliability_term, loss_term, loss_gap,
+            observation_count, target_loss, clip_loss
+        ) = (
             adaptive_mix_weight(
+                iter_num,max_iter,
                 q_target,
                 q_clip,
                 base_softmax_out.detach(),
@@ -725,6 +798,12 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
             prior_bank[tar_idx] = prior
             target_stability_bank[tar_idx] = target_stability
             clip_stability_bank[tar_idx] = clip_stability
+            prior_term_bank[tar_idx] = prior_term
+            reliability_term_bank[tar_idx] = reliability_term
+            loss_term_bank[tar_idx] = loss_term
+            loss_gap_bank[tar_idx] = loss_gap
+            target_loss_bank[tar_idx] = target_loss
+            clip_loss_bank[tar_idx] = clip_loss
 
         optimizer.zero_grad()
         opt_C.zero_grad()
@@ -748,6 +827,14 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
                     mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
+            prompt_update_lr = 0.002 if iter_num < (max_iter / 2) else 0.0001
+            schedule_log_str = (
+                'Schedule: progress={:.3f}; aux={:.4f}; d={:.4f}; margin={:.5f}; '
+                'epoch={}; interval={}; lr={:.6f}; prompt_lr={:.5f}'
+            ).format(
+                iter_num / float(max_iter), current_aux, d, margin, epoch_num,
+                interval_iter, optimizer.param_groups[0]['lr'], prompt_update_lr
+            )
             netF.eval()
             netB.eval()
             netC.eval()
@@ -774,6 +861,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
              #   wandb.log({"accuracy": acc_s_te, "loss ": total_loss})
                     
             log_str += '\n' + gate_log_str
+            log_str += '\n' + schedule_log_str
             logger.info(log_str)
 
            

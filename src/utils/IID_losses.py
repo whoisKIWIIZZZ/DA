@@ -48,7 +48,6 @@ def IID_loss_old(x_out, x_tf_out, lamb=1.0, EPS=sys.float_info.epsilon):
   return loss
 
 
-
 def IID_loss(N,x_out, x_tf_out, w_base,w_aux,bn,lamb=1.0, EPS=sys.float_info.epsilon):
   # has had softmax applied
   _, k = x_out.size()
@@ -104,4 +103,3 @@ def compute_joint(x_out, x_tf_out):
   p_i_j = p_i_j / p_i_j.sum()  # normalise
 
   return p_i_j
-

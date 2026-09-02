@@ -1,6 +1,6 @@
-DATASET="office31" # imagenet_c domainnet126 officehome
-METHOD="difo"          # shot nrc plue difo
-
+DATASET="office" # imagenet_c domainnet126 officehome
+METHOD="diff_align"          # shot nrc plue difo
+export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD
 
@@ -16,8 +16,8 @@ for s in ${s_list[*]}; do
         then
         continue
     fi
-        CUDA_VISIBLE_DEVICES=1 ~/anaconda3/envs/sfa_susu/bin/python image_target_of_oh_vs.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
-            SETTING.S "$s" SETTING.T "$t" &
+        CUDA_VISIBLE_DEVICES=3 /home/yishouzhuo/miniconda3/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
+            SETTING.S "$s" SETTING.T "$t" 
         wait
     done
 done 
