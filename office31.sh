@@ -1,5 +1,5 @@
 DATASET="office" # imagenet_c domainnet126 officehome
-METHOD="diff_align"          # shot nrc plue difo
+METHOD="difo"          # shot nrc plue difo
 export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD

@@ -2,9 +2,11 @@ import os.path as osp
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
+from src.utils.adaptive_alpha import adaptive_mix_weight
 from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
@@ -168,6 +170,10 @@ def train_target(cfg):
     loader = dset_loaders["target"]
     num_sample=len(loader.dataset)
     score_bank = torch.randn(num_sample, cfg.class_num).cuda()
+    # adaptive gate banks: clip 历史用于 stability, 观测次数用于 prior
+    clip_score_bank = torch.zeros(num_sample, cfg.class_num).cuda()
+    clip_score_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
+    gate_observation_bank = torch.zeros(num_sample, device=score_bank.device)
     netF.eval()
     netB.eval()
     netC.eval()
@@ -183,8 +189,8 @@ def train_target(cfg):
             outputs=nn.Softmax(dim=1)(outputs)
             score_bank[indx] = outputs.detach().clone()
 
-    max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
-    interval_iter = max_iter *7//cfg.TEST.INTERVAL
+    max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])*2
+    interval_iter = max_iter //cfg.TEST.INTERVAL
     iter_num = 0
     text_features = None
 
@@ -217,30 +223,33 @@ def train_target(cfg):
         outputs_test = netC(features_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
 
-        ln_sam = softmax_out.shape[0]
-        data = np.random.exponential(scale=0.1, size=ln_sam)
-        data = np.expand_dims(data, axis=1)
-        data = torch.from_numpy(data)
-
-        K = softmax_out.size(1)
-        _, predict = torch.max(score_bank[tar_idx], 1)
-        _, clip_predict = torch.max(clip_all_output[tar_idx], 1)
-        predict_one = np.eye(K)[predict.cpu()]
-        clip_one = np.eye(K)[clip_predict.cpu()]
-
-        data = data.numpy()
-        predict_mix = data*predict_one + (1-data)*clip_one
-        predict_mix = torch.from_numpy(predict_mix).cuda()
+        # 自适应 per-sample target/clip 混合权重(替代随机指数分布,逻辑同 diff_new_opt_new_plus)
+        q_target = score_bank[tar_idx].detach()
+        q_clip = clip_all_output[tar_idx][:, :cfg.class_num].detach()
+        log_prob = F.log_softmax(outputs_test, dim=1)
+        target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
+        clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
+        alpha = adaptive_mix_weight(
+            iter_num, max_iter,
+            q_target,
+            q_clip,
+            softmax_out.detach(),
+            clip_score_bank[tar_idx],
+            clip_score_seen[tar_idx],
+            gate_observation_bank[tar_idx],
+            target_loss_per_sample,
+            clip_loss_per_sample,
+            cfg, section_name='DIFO'
+        )[0]
+        predict_mix = alpha.unsqueeze(1) * q_target + (1.0 - alpha.unsqueeze(1)) * q_clip
 
         if cfg.DIFO.CLS_PAR > 0:
-            targets = predict_mix
-            loss_soft = (- targets * outputs_test).sum(dim=1)
-            classifier_loss = loss_soft.mean()
+            classifier_loss = (-(predict_mix * log_prob).sum(dim=1)).mean()
             classifier_loss *= cfg.DIFO.CLS_PAR
         else:
             classifier_loss = torch.tensor(0.0).cuda()
 
-        iic_loss = IID_losses.IID_loss_old(softmax_out, clip_all_output[tar_idx])
+        iic_loss = IID_losses.IID_loss_old(softmax_out, clip_all_output[tar_idx][:, :cfg.class_num])
         classifier_loss = classifier_loss + cfg.DIFO.IIC_PAR * iic_loss
 
         msoftmax = softmax_out.mean(dim=0)
@@ -249,6 +258,9 @@ def train_target(cfg):
         classifier_loss = classifier_loss - cfg.DIFO.GENT_PAR * gentropy_loss
         with torch.no_grad():
             score_bank[tar_idx] = softmax_out.detach().clone()
+            clip_score_bank[tar_idx] = q_clip
+            clip_score_seen[tar_idx] = True
+            gate_observation_bank[tar_idx] += 1
 
         optimizer.zero_grad()
         classifier_loss.backward()
@@ -260,10 +272,10 @@ def train_target(cfg):
           #  cal_acc_js(dset_loaders['test'],netF,netB,netC,clip_all_output)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss) + '\n' + acc_list
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={};alpha={:.3f}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss,alpha.mean().item()) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss)
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={};alpha={:.3f}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss,alpha.mean().item())
 
             logger.info(log_str)
             

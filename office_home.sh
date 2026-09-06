@@ -1,9 +1,9 @@
 #!/bin/bash
 DATASET="office-home" # imagenet_c domainnet126 office-home
-METHOD="diff_align"          # shot nrc plue difo source-neg source_clip
+METHOD="ProDe"          # shot nrc plue difo source-neg source_clip
 BRIDGE_MODE=false             # true=启用bridge实验checkpoint保存
 
-#export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD
 echo BRIDGE_MODE: $BRIDGE_MODE

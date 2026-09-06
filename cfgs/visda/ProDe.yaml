@@ -26,3 +26,4 @@ ProDe:
   N_CTX : 4
   LOAD : None
   IIC_PAR: 1.0
+  USE_ADAPTIVE_ALPHA: 1

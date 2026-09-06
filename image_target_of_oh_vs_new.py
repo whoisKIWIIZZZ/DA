@@ -18,7 +18,7 @@ import src.methods.oh.difo_50 as DIFO_50
 import src.methods.oh.diffadd_new_opt_old  as DIFFOPT
 #import src.methods.oh.diffadd_new_opt_50  as DIFFOPT_50
 import src.methods.oh.ProDe as ProDe
-import src.methods.oh.ProDe_diff as ProDe_diff
+# import src.methods.oh.ProDe_diff as ProDe_diff
 import src.methods.oh.diff_new_opt_new_50 as DIFF_ALIGN_50
 import src.methods.oh.diff_new_opt_new as DIFF_ALIGN
 import src.methods.oh.diff_new_opt_new_plus as DIFF_ALIGN_PLUS
@@ -33,8 +33,8 @@ import src.utils.plot as PLOT
 import src.methods.oh.difo_plus as DIFO_PLUS
 import src.methods.oh.difo_plus_partial as DIFO_PLUS_PARTIAL
 import src.methods.oh.difo_plus_open as DIFO_PLUS_OPEN
-import src.methods.oh.ProDe_partial as PRODE_PARTIAL
-import src.methods.oh.ProDe_open as PRODE_OPEN
+# import src.methods.oh.ProDe_partial as PRODE_PARTIAL
+# import src.methods.oh.ProDe_open as PRODE_OPEN
 from conf import cfg, load_cfg_from_args
 from setproctitle import setproctitle
 import warnings

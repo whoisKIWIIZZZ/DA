@@ -13,6 +13,7 @@ from sklearn.metrics import confusion_matrix
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
+from src.utils.adaptive_alpha import adaptive_alpha_from_logits, gate_diagnostics
 logger = logging.getLogger(__name__)
 
 
@@ -207,6 +208,26 @@ def train_target(cfg):
     iter_num = 0
     num_sample=len(dset_loaders["target"].dataset)
     logtis_bank = torch.randn(num_sample, cfg.class_num).cuda()
+    alpha_observation_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    alpha_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    alpha_seen = torch.zeros(num_sample, dtype=torch.bool, device=logtis_bank.device)
+    prior_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    target_confidence_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    clip_confidence_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    target_stability_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    clip_stability_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    prior_term_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    reliability_term_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    loss_term_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    loss_gap_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    target_loss_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    clip_loss_bank = torch.zeros(num_sample, device=logtis_bank.device)
+    target_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    clip_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    label_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    alpha_sum = 0.0
+    alpha_count = 0
+    logger.info('ProDe adaptive alpha: %s', int(cfg.ProDe.USE_ADAPTIVE_ALPHA) == 1)
 
     loader = dset_loaders["source"]
     with torch.no_grad():
@@ -224,10 +245,10 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
         if inputs_test.size(0) == 1:
             continue
 
@@ -247,7 +268,49 @@ def train_target(cfg):
         clip_score = clip_score.float()
 
         with torch.no_grad():
-            new_clip = (outputs_test_new - 0.1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+            if int(getattr(cfg.ProDe, 'USE_ADAPTIVE_ALPHA', 0)) == 1:
+                details = adaptive_alpha_from_logits(
+                    outputs_test_new,
+                    clip_score,
+                    cfg,
+                    target_history_logits=logtis_bank[tar_idx],
+                    observation_count=alpha_observation_bank[tar_idx],
+                    step=iter_num,
+                    max_step=max_iter,
+                    section_name='ProDe', return_details=True
+                )
+                (alpha, prior, target_confidence, clip_confidence,
+                 target_stability, clip_stability, prior_term,
+                 reliability_term, loss_term, loss_gap, observation_count,
+                 target_loss, clip_loss) = details
+                new_clip = (
+                    alpha.unsqueeze(1) * outputs_test_new
+                    + (1.0 - alpha.unsqueeze(1)) * clip_score.cuda()
+                    - 0.1 * logtis_bank[tar_idx].cuda()
+                )
+                alpha_sum += alpha.sum().item()
+                alpha_count += alpha.numel()
+            else:
+                new_clip = (outputs_test_new - 0.1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+                alpha = outputs_test_new.new_full((outputs_test_new.size(0),), 0.5)
+
+            if int(getattr(cfg.ProDe, 'USE_ADAPTIVE_ALPHA', 0)) == 1:
+                alpha_bank[tar_idx] = alpha
+                alpha_seen[tar_idx] = True
+                prior_bank[tar_idx] = prior
+                target_confidence_bank[tar_idx] = target_confidence
+                clip_confidence_bank[tar_idx] = clip_confidence
+                target_stability_bank[tar_idx] = target_stability
+                clip_stability_bank[tar_idx] = clip_stability
+                prior_term_bank[tar_idx] = prior_term
+                reliability_term_bank[tar_idx] = reliability_term
+                loss_term_bank[tar_idx] = loss_term
+                loss_gap_bank[tar_idx] = loss_gap
+                target_loss_bank[tar_idx] = target_loss
+                clip_loss_bank[tar_idx] = clip_loss
+            target_prediction_bank[tar_idx] = outputs_test_new.argmax(dim=1)
+            clip_prediction_bank[tar_idx] = clip_score.argmax(dim=1)
+            label_bank[tar_idx] = labels.to(label_bank.device).long()
         #     for name, t in [
    		#  ("outputs_test_new",   outputs_test_new),
    		#  ("logits_bank term",   1 * logtis_bank[tar_idx].cuda()),
@@ -281,10 +344,11 @@ def train_target(cfg):
         optimizer.step()
         #optimizer_ib.step()
         with torch.no_grad():
-            logtis_bank[tar_idx] = (
-                0.9 * logtis_bank[tar_idx] +
-                0.1 * outputs_test.detach()
-            )
+            # logtis_bank[tar_idx] = (
+            #     0.9 * logtis_bank[tar_idx] +
+            #     0.1 * outputs_test.detach()
+            # )
+            alpha_observation_bank[tar_idx] += 1
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
@@ -295,6 +359,20 @@ def train_target(cfg):
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
+
+            if alpha_count > 0:
+                log_str += '; alpha_mean={:.4f}'.format(alpha_sum / alpha_count)
+            if int(getattr(cfg.ProDe, 'USE_ADAPTIVE_ALPHA', 0)) == 1:
+                log_str += '\n' + gate_diagnostics(
+                    alpha_bank, alpha_seen, prior_bank, target_prediction_bank,
+                    clip_prediction_bank, label_bank, target_confidence_bank,
+                    clip_confidence_bank, target_stability_bank, clip_stability_bank,
+                    prior_term_bank, reliability_term_bank, loss_term_bank,
+                    loss_gap_bank, target_loss_bank, clip_loss_bank,
+                    alpha_observation_bank, cfg, section_name='ProDe'
+                )
+            else:
+                log_str += '\nGate: adaptive alpha disabled'
 
             logger.info(log_str)
             netF.train()

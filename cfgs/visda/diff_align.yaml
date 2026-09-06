@@ -1,6 +1,6 @@
 MODEL:
   ARCH: resnet101
-  METHOD: draw
+  METHOD: diff_align
 SETTING:
   DATASET: VISDA-C
   S: 0
@@ -27,6 +27,7 @@ DIFF_ALIGN:
   N_CTX : 4
   LOAD : None
   USE_NEG: True
+  MERGE_ADAPTIVE: False
 
 
 
