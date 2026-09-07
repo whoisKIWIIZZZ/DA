@@ -1,6 +1,6 @@
 #!/bin/sh
 DATASET="visda" # imagenet_c domainnet126 officehome
-METHOD="diff_align"          # shot nrc plue difo
+METHOD="difo"          # shot nrc plue difo
 PYTHON=/home/yishouzhuo/miniconda3/envs/sfa/bin/python
 echo DATASET: $DATASET
 echo METHOD: $METHOD
@@ -18,7 +18,7 @@ for s in ${s_list[*]}; do
         continue
     fi
         CUDA_VISIBLE_DEVICES=3 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
-            SETTING.S "$s" SETTING.T "$t" &
+            SETTING.S "$s" SETTING.T "$t" 
         wait
     done
 done 

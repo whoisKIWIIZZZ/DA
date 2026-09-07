@@ -2,7 +2,7 @@
 DATASET="office-home" # imagenet_c domainnet126 office-home
 METHOD="ProDe"          # shot nrc plue difo source-neg source_clip
 BRIDGE_MODE=false             # true=启用bridge实验checkpoint保存
-
+DA="pda"
 export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD
@@ -32,22 +32,7 @@ for s in ${s_list[*]}; do
                 BRIDGE.ENABLE True 
         else
             CUDA_VISIBLE_DEVICES=1 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
-                SETTING.S "$s" SETTING.T "$t" 
-        fi
-        wait
-
-        # 训练结束 → 自动运行 bridge 分析
-        if $BRIDGE_MODE; then
-            BRIDGE_DIR="output_Models/uda/${DATASET}/${S_LETTER}${T_LETTER}/${METHOD}/bridge_ckpts"
-            echo "========== Bridge 分析: ${S_LETTER}→${T_LETTER} =========="
-
-            echo "--- Layer 0-1: 几何恒等式 + 模态分解 ---"
-            $PYTHON tools/analyze_crossover.py "$BRIDGE_DIR"
-
-            echo "--- Layer 2: NTK 共识算子 + 信任半径 ---"
-            $PYTHON tools/analyze_ntk.py "$BRIDGE_DIR"
-
-            echo "========== 分析完成 =========="
+                SETTING.S "$s" SETTING.T "$t"  DA $DA
         fi
     done
 done

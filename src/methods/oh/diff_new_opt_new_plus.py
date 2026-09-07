@@ -685,7 +685,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
             if cfg.SETTING.DATASET == 'VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC,cfg, True)
                 
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%,{:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={},iid={},cls={},gen={}'.format(cfg.name, iter_num, max_iter,
                                                                                      acc_s_te,
                                                                                      total_loss,loss_iid,classifier_loss,gentropy_loss) + '\n' + acc_list
                 if iter_num == max_iter:

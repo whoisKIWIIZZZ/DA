@@ -83,6 +83,35 @@ def adaptive_mix_weight(i, mi, q_target, q_clip, target_output, clip_history,
     )
 
 
+class TargetLogitBank:
+    """Direct (non-EMA) per-sample bank of target logits.
+
+    Stores the most recent target logits for each sample, overwriting them on
+    every update -- this is the target prediction history, not the source
+    bank.  Seed it with source logits so the first visit of each sample has a
+    valid history.
+    """
+
+    def __init__(self, num_samples, num_classes, device, init_logits=None):
+        self.num_samples = num_samples
+        self.num_classes = num_classes
+        if init_logits is not None:
+            self.bank = init_logits.detach().clone()
+        else:
+            self.bank = torch.zeros(num_samples, num_classes, device=device)
+
+    @property
+    def device(self):
+        return self.bank.device
+
+    def update(self, idx, logits):
+        # Direct store of the target logit history -- no EMA smoothing.
+        self.bank[idx] = logits.detach().clone()
+
+    def __getitem__(self, idx):
+        return self.bank[idx]
+
+
 def adaptive_alpha_from_logits(target_logits, clip_logits, cfg,
                                target_history_logits=None,
                                observation_count=None, step=0, max_step=1,

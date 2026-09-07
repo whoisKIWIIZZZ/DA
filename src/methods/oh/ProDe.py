@@ -13,7 +13,7 @@ from sklearn.metrics import confusion_matrix
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
-from src.utils.adaptive_alpha import adaptive_alpha_from_logits, gate_diagnostics
+from src.utils.adaptive_alpha import adaptive_alpha_from_logits, gate_diagnostics, TargetLogitBank
 logger = logging.getLogger(__name__)
 
 
@@ -242,6 +242,14 @@ def train_target(cfg):
             #outputs=nn.Softmax(dim=1)(outputs)
             logtis_bank[indx] = outputs.detach().clone()
 
+    # Independent target logit history bank.  Unlike the source bank above
+    # (which stays fixed), this one directly stores the most recent target
+    # logits per sample -- no EMA sliding update.  Seeded with the source
+    # logits so the first visit of each sample has a valid history; the
+    # source bank itself is never modified.
+    target_history_bank = TargetLogitBank(
+        num_sample, cfg.class_num, logtis_bank.device, init_logits=logtis_bank
+    )
 
     while iter_num < max_iter:
         try:
@@ -273,7 +281,7 @@ def train_target(cfg):
                     outputs_test_new,
                     clip_score,
                     cfg,
-                    target_history_logits=logtis_bank[tar_idx],
+                    target_history_logits=target_history_bank[tar_idx],
                     observation_count=alpha_observation_bank[tar_idx],
                     step=iter_num,
                     max_step=max_iter,
@@ -284,7 +292,7 @@ def train_target(cfg):
                  reliability_term, loss_term, loss_gap, observation_count,
                  target_loss, clip_loss) = details
                 new_clip = (
-                    alpha.unsqueeze(1) * outputs_test_new
+                     alpha.unsqueeze(1)*outputs_test_new
                     + (1.0 - alpha.unsqueeze(1)) * clip_score.cuda()
                     - 0.1 * logtis_bank[tar_idx].cuda()
                 )
@@ -344,10 +352,9 @@ def train_target(cfg):
         optimizer.step()
         #optimizer_ib.step()
         with torch.no_grad():
-            # logtis_bank[tar_idx] = (
-            #     0.9 * logtis_bank[tar_idx] +
-            #     0.1 * outputs_test.detach()
-            # )
+            # Directly store the current target logits as the new history
+            # (no EMA).  The source bank logtis_bank is left untouched.
+            target_history_bank.update(tar_idx, outputs_test_new)
             alpha_observation_bank[tar_idx] += 1
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
