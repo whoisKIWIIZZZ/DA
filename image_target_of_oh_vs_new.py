@@ -12,7 +12,9 @@ import src.methods.oh.tpds as TPDS
 import src.methods.oh.nrc_vs as Nrc_vs
 import src.methods.oh.lcfd as LCFD
 import src.methods.oh.difo as DIFO
+import src.methods.oh.difo0906 as DIFO_OLD
 import src.methods.oh.difo_50 as DIFO_50
+import src.methods.oh.ProDe_old as ProDe_old
 #import src.methods.oh.diffadd  as DIFFADD
 #import src.methods.oh.diffadd_50  as DIFFADD_50
 import src.methods.oh.diffadd_new_opt_old  as DIFFOPT
@@ -147,7 +149,7 @@ if __name__ == "__main__":
     
     elif cfg.MODEL.METHOD == "ProDe":
         print("using ProDe method")
-        acc = ProDe.train_target(cfg)
+        acc = ProDe_old.train_target(cfg)
 
     elif cfg.MODEL.METHOD == "ProDe_diff":
         print("using ProDe+diff method (with negative classes)")

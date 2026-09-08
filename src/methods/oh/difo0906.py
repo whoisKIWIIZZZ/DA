@@ -7,7 +7,7 @@ from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
 from src.models import network
 from torch.utils.data import DataLoader
-from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
+from src.data.data_list import  ImageList_idx
 from sklearn.metrics import confusion_matrix
 import clip
 from src.utils.utils import *
@@ -40,9 +40,9 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
-    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
+    dsets["target"] = ImageList_idx(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
+    dsets["test"] = ImageList_idx(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
@@ -86,7 +86,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0][0]
+            inputs = data[0]
             labels = data[1]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
@@ -175,7 +175,7 @@ def train_target(cfg):
         iter_test = iter(loader)
         for i in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0][0]
+            inputs = data[0]
             indx=data[-1]
             inputs = inputs.cuda()
             output = netB(netF(inputs))
@@ -184,16 +184,16 @@ def train_target(cfg):
             score_bank[indx] = outputs.detach().clone()
 
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
-    interval_iter = max_iter //cfg.TEST.INTERVAL
+    interval_iter = max_iter // cfg.TEST.INTERVAL
     iter_num = 0
     text_features = None
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            inputs_test, _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            inputs_test, _, tar_idx = next(iter_test)
 
         if inputs_test.size(0) == 1:
             continue
@@ -257,16 +257,14 @@ def train_target(cfg):
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
-          #  cal_acc_js(dset_loaders['test'],netF,netB,netC,clip_all_output)
             if cfg.SETTING.DATASET=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss) + '\n' + acc_list
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss)
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
 
             logger.info(log_str)
-            
             netF.train()
             netB.train()
 
@@ -291,17 +289,15 @@ def obtain_label(loader, netF, netB, netC,text_inputs,text_features,clip_model):
         iter_test = iter(loader)
         for _ in range(len(loader)):
             data = next(iter_test)
-            inputs = data[0][0]
-            inputs_clip = data[0][1]
+            inputs = data[0]
             labels = data[1]
-            inputs = inputs.cuda()
-            inputs_clip = inputs_clip.cuda()
-            feas = netB(netF(inputs))
+            inputs = inputs.cuda() 
+            feas = netB(netF(inputs)) 
             outputs = netC(feas)
             if (text_features!=None):
-                clip_score = clip_text(clip_model,text_features,inputs_clip)
+                clip_score = clip_text(clip_model,text_features,inputs)
             else :
-                clip_score,_ = clip_model(inputs_clip, text_inputs)
+                clip_score,_ = clip_model(inputs, text_inputs)
 
             clip_score = clip_score.cpu()
             if start_test:
@@ -351,61 +347,3 @@ def clip_text(model,text_features,inputs_test):
     image_features = image_features / image_features.norm(dim=1, keepdim=True)
     logits = logit_scale * image_features @ text_features.t()
     return logits
-
-def js_divergence(p, q, eps=1e-8):
-    """
-    p, q: probability distributions, shape [N, C]
-    """
-    p = p.clamp(min=eps)
-    q = q.clamp(min=eps)
-    m = 0.5 * (p + q)
-    js = 0.5 * (
-        F.kl_div(m.log(), p, reduction='none').sum(dim=1) +
-        F.kl_div(m.log(), q, reduction='none').sum(dim=1)
-    )
-    return js
-
-def cal_acc_js(loader, netF, netB, netC, clip_softmax):
-    netF.eval()
-    netB.eval()
-    netC.eval()
-
-    start_test = True
-    with torch.no_grad():
-        iter_test = iter(loader)
-        for _ in range(len(loader)):
-            data = next(iter_test)
-            inputs, labels = data[0][0].cuda(), data[1]
-
-            # target model
-            logits_t = netC(netB(netF(inputs)))
-            probs_t = F.softmax(logits_t, dim=1)
-
-            # ViL model
-            logits_v = clip_softmax
-            probs_v = F.softmax(logits_v, dim=1)
-
-            if start_test:
-                all_probs_t = probs_t.cpu()
-                #all_probs_v = probs_v.cpu()
-                all_labels = labels
-                start_test = False
-            else:
-                all_probs_t = torch.cat((all_probs_t, probs_t.cpu()), 0)
-                #all_probs_v = torch.cat((all_probs_v, probs_v.cpu()), 0)
-                all_labels = torch.cat((all_labels, labels), 0)
-
-    # target predictions
-    _, pred = torch.max(all_probs_t, dim=1)
-
-    correct_mask = (pred == all_labels)
-    incorrect_mask = ~correct_mask
-
-    # JS divergence per sample
-    js_all = js_divergence(all_probs_t, probs_v.cpu())
-
-    js_correct = js_all[correct_mask].mean().item()
-    js_incorrect = js_all[incorrect_mask].mean().item()
-
-    log_str = "js_c:{};js_nc:{};correct_mask:{};ncorrect_mask:{}".format(js_correct,js_incorrect,correct_mask.sum().item(),incorrect_mask.sum().item())
-    logging.info(log_str)

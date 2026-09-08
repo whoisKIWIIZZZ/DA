@@ -13,6 +13,8 @@ OPTIM:
   LR: 5e-3
   WD: 1e-3
   NESTEROV: TRUE
+# Test on source after target adaptation (GSFDA)
+GSFDA: False
 TEST:
   BATCH_SIZE: 64
   MAX_EPOCH: 30

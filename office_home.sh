@@ -3,11 +3,12 @@ DATASET="office-home" # imagenet_c domainnet126 office-home
 METHOD="ProDe"          # shot nrc plue difo source-neg source_clip
 BRIDGE_MODE=false             # true=启用bridge实验checkpoint保存
 DA="pda"
+
 export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD
 echo BRIDGE_MODE: $BRIDGE_MODE
-
+G=False
 # 域索引→缩写映射 (Art/Clipart/Product/RealWorld → A/C/P/R)
 domain_abbr=(A C P R)
 PYTHON=/home/yishouzhuo/miniconda3/envs/sfa/bin/python
@@ -32,7 +33,7 @@ for s in ${s_list[*]}; do
                 BRIDGE.ENABLE True 
         else
             CUDA_VISIBLE_DEVICES=1 $PYTHON image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
-                SETTING.S "$s" SETTING.T "$t"  DA $DA
+                SETTING.S "$s" SETTING.T "$t"  DA $DA  GSFDA $G
         fi
     done
 done

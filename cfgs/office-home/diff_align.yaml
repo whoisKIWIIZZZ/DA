@@ -29,7 +29,7 @@ DIFF_ALIGN:
   IIC_PAR: 1.0
   USE_NEG: True
   LENT_PAR : 0.05
-  MERGE_ADAPTIVE: False  # True=自适应融合, False=固定scale=0.1(同difo_plus)
+  MERGE_ADAPTIVE: True  # True=自适应融合, False=固定scale=0.1(同difo_plus)
 BRIDGE:
   ENABLE: True
   CP_INTERVAL: 1

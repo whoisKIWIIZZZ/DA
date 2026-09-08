@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
-from src.utils.adaptive_alpha import adaptive_mix_weight
+from src.utils.adaptive_alpha import adaptive_mix_weight, test_on_source
 from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
@@ -24,6 +24,7 @@ def data_load(cfg):
     train_bs = cfg.TEST.BATCH_SIZE
     txt_tar = open(cfg.t_dset_path).readlines()
     txt_test = open(cfg.test_dset_path).readlines()
+    txt_src = open(cfg.s_dset_path).readlines()
     if not cfg.DA == 'uda':
         label_map_s = {}
         for i in range(len(cfg.src_classes)):
@@ -35,17 +36,28 @@ def data_load(cfg):
             reci = rec.strip().split(' ')
             if int(reci[1]) in cfg.tar_classes:
                 if int(reci[1]) in cfg.src_classes:
-                    line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'   
+                    line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
                     new_tar.append(line)
                 else:
-                    line = reci[0] + ' ' + str(len(label_map_s)) + '\n'   
+                    line = reci[0] + ' ' + str(len(label_map_s)) + '\n'
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
+
+        new_src = []
+        for i in range(len(txt_src)):
+            rec = txt_src[i]
+            reci = rec.strip().split(' ')
+            if int(reci[1]) in cfg.src_classes:
+                line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
+                new_src.append(line)
+        txt_src = new_src.copy()
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["source_test"] = ImageList_idx_aug_fix_old(txt_src, transform=image_test())
+    dset_loaders["source_test"] = DataLoader(dsets["source_test"], batch_size=train_bs, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
 def image_test(resize_size=256, crop_size=224, alexnet=False):
@@ -128,6 +140,8 @@ def print_cfg(cfg):
 
 
 def train_target(cfg):
+    if cfg.GSFDA:
+        print("GSFDA,test on source")
     clip_model, preprocess,_ = clip.load(cfg.DIFO.ARCH)
     clip_model.float()
     text_inputs = clip_pre_text(cfg)
@@ -189,7 +203,7 @@ def train_target(cfg):
             outputs=nn.Softmax(dim=1)(outputs)
             score_bank[indx] = outputs.detach().clone()
 
-    max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])*2
+    max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
     interval_iter = max_iter //cfg.TEST.INTERVAL
     iter_num = 0
     text_features = None
@@ -282,11 +296,14 @@ def train_target(cfg):
             netF.train()
             netB.train()
 
-    if cfg.ISSAVE:   
+    if cfg.ISSAVE:
         torch.save(netF.state_dict(), osp.join(cfg.output_dir, "target_F_" + cfg.savename + ".pt"))
         torch.save(netB.state_dict(), osp.join(cfg.output_dir, "target_B_" + cfg.savename + ".pt"))
         torch.save(netC.state_dict(), osp.join(cfg.output_dir, "target_C_" + cfg.savename + ".pt"))
-        
+
+    if cfg.GSFDA:
+        test_on_source(cfg, netF, netB, netC, dset_loaders)
+
     return netF, netB, netC
 
 

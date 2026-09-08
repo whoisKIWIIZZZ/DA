@@ -25,6 +25,7 @@ def data_load(cfg):
     train_bs = cfg.TEST.BATCH_SIZE
     txt_tar = open(cfg.t_dset_path).readlines()
     txt_test = open(cfg.test_dset_path).readlines()
+    txt_src = open(cfg.s_dset_path).readlines()
     if not cfg.DA == 'uda':
         label_map_s = {}
         for i in range(len(cfg.src_classes)):
@@ -36,19 +37,30 @@ def data_load(cfg):
             reci = rec.strip().split(' ')
             if int(reci[1]) in cfg.tar_classes:
                 if int(reci[1]) in cfg.src_classes:
-                    line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'   
+                    line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
                     new_tar.append(line)
                 else:
-                    line = reci[0] + ' ' + str(len(label_map_s)) + '\n'   
+                    line = reci[0] + ' ' + str(len(label_map_s)) + '\n'
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
+
+        new_src = []
+        for i in range(len(txt_src)):
+            rec = txt_src[i]
+            reci = rec.strip().split(' ')
+            if int(reci[1]) in cfg.src_classes:
+                line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
+                new_src.append(line)
+        txt_src = new_src.copy()
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["source"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["source"] = DataLoader(dsets["source"], batch_size=2, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=True)
+    dsets["source_test"] = ImageList_idx_aug_fix_old(txt_src, transform=image_test())
+    dset_loaders["source_test"] = DataLoader(dsets["source_test"], batch_size=train_bs, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
 def image_test(resize_size=256, crop_size=224, alexnet=False):
@@ -130,6 +142,24 @@ def print_cfg(cfg):
     return s
 
 
+def test_on_source(cfg, netF, netB, netC, dset_loaders):
+    ## evaluate the adapted model on the source split (GSFDA)
+    netF.eval()
+    netB.eval()
+    netC.eval()
+    if cfg.SETTING.DATASET == 'VISDA-C':
+        acc_s, acc_list = cal_acc(dset_loaders['source_test'], netF, netB, netC, True)
+        log_str = 'GSFDA: Task: {}, Source Accuracy = {:.2f}%'.format(cfg.name_src, acc_s) + '\n' + acc_list
+    else:
+        acc_s, _ = cal_acc(dset_loaders['source_test'], netF, netB, netC, False)
+        log_str = 'GSFDA: Task: {}, Source Accuracy = {:.2f}%'.format(cfg.name_src, acc_s)
+    logger.info(log_str)
+    netF.train()
+    netB.train()
+    netC.train()
+    return acc_s
+
+
 def test_time_tuning(model, inputs, optimizer, cfg, target_output):
     target_output = target_output.cuda()
     target_output =  nn.Softmax(dim=1)(target_output)
@@ -153,6 +183,8 @@ def test_time_adapt_eval(input, model, optimizer, optim_state, cfg, target_outpu
     return output
 
 def train_target(cfg):
+    if cfg.GSFDA:
+        print("GSFDA,test on source")
     text_inputs = clip_pre_text(cfg)
     dset_loaders = data_load(cfg)
     model = get_coop(cfg.ProDe.ARCH, cfg.SETTING.DATASET, int(cfg.GPU_ID), cfg.ProDe.N_CTX, cfg.ProDe.CTX_INIT)
@@ -390,7 +422,10 @@ def train_target(cfg):
         torch.save(netF.state_dict(), osp.join(cfg.output_dir, "target_F_" + cfg.savename + ".pt"))
         torch.save(netB.state_dict(), osp.join(cfg.output_dir, "target_B_" + cfg.savename + ".pt"))
         torch.save(netC.state_dict(), osp.join(cfg.output_dir, "target_C_" + cfg.savename + ".pt"))
-        
+
+    if cfg.GSFDA:
+        test_on_source(cfg, netF, netB, netC, dset_loaders)
+
     return netF, netB, netC
 
 

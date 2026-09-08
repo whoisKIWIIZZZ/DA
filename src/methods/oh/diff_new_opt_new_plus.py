@@ -19,6 +19,7 @@ from src.utils.utils import *
 from src.utils.prompt_tuning_diff_new_optim_1130 import *
 from src.utils.loss import entropy
 
+from src.utils.adaptive_alpha import test_on_source
 logger = logging.getLogger(__name__)
 
 import wandb
@@ -49,6 +50,7 @@ def data_load(cfg,preprocess):
     train_bs = cfg.TEST.BATCH_SIZE
     txt_tar = open(cfg.t_dset_path).readlines()
     txt_test = open(cfg.test_dset_path).readlines()
+    txt_src = open(cfg.s_dset_path).readlines()
     if not cfg.DA == 'uda':
         label_map_s = {}
         for i in range(len(cfg.src_classes)):
@@ -67,6 +69,15 @@ def data_load(cfg,preprocess):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
+
+        new_src = []
+        for i in range(len(txt_src)):
+            rec = txt_src[i]
+            reci = rec.strip().split(' ')
+            if int(reci[1]) in cfg.src_classes:
+                line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
+                new_src.append(line)
+        txt_src = new_src.copy()
     target_records = [line.strip().split() for line in txt_tar if line.strip()]
     target_paths = [record[0] for record in target_records]
     target_labels = [int(record[1]) for record in target_records]
@@ -88,6 +99,8 @@ def data_load(cfg,preprocess):
                                       num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["clip_test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["clip_test"] = DataLoader(dsets["clip_test"], batch_size=train_bs * 3, shuffle=False,num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["source_test"] = ImageList_idx_aug_fix_old(txt_src, transform=image_test())
+    dset_loaders["source_test"] = DataLoader(dsets["source_test"], batch_size=train_bs, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
 
@@ -323,6 +336,8 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         "robust temperature:", cfg.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE,
         "target EMA decay:", cfg.DIFF_ALIGN.MERGE_TARGET_EMA_DECAY
     )
+    if cfg.GSFDA:
+        print("GSFDA,test on source")
     # clip模型参数初始化
     clip_model, preprocess, _ = clip.load(cfg.DIFF_ALIGN.ARCH)  # type: ignore # vit-B32
     clip_model.float()
@@ -712,6 +727,8 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
             netF.train()
             netB.train()
 
+    if cfg.GSFDA:
+        test_on_source(cfg, netF, netB, netC, dset_loaders)
     return netF, netB, netC
 
 

@@ -34,6 +34,9 @@ _C.GPU_ID = '0'
 _C.SAVE_DIR = "./output_Models"
 
 _C.ISSAVE = True
+
+# Test on source after target adaptation (GSFDA: evaluate source accuracy)
+_C.GSFDA = False
 # Path to a specific checkpoint
 _C.CKPT_PATH = ""
 

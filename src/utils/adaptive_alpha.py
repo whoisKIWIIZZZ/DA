@@ -1,6 +1,10 @@
+import logging
 import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.metrics import confusion_matrix
+
+logger = logging.getLogger(__name__)
 
 
 def normalized_confidence(probabilities):
@@ -244,3 +248,43 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction,
         gap_stats[0], gap_stats[2], observation_stats[0], observation_stats[2],
         target_loss_stats[0], clip_loss_stats[0], target_loss_stats[2], clip_loss_stats[2]
     )
+
+
+
+
+def test_on_source(cfg, netF, netB, netC, dset_loaders):
+    ## evaluate the adapted model on the source split (GSFDA)
+    netF.eval()
+    netB.eval()
+    netC.eval()
+    start_test = True
+    with torch.no_grad():
+        iter_test = iter(dset_loaders['source_test'])
+        for _ in range(len(dset_loaders['source_test'])):
+            data = next(iter_test)
+            inputs = data[0][0].cuda()
+            labels = data[1]
+            outputs = netC(netB(netF(inputs)))[:, :cfg.class_num]
+            if start_test:
+                all_output = outputs.float().cpu()
+                all_label = labels.float()
+                start_test = False
+            else:
+                all_output = torch.cat((all_output, outputs.float().cpu()), 0)
+                all_label = torch.cat((all_label, labels.float()), 0)
+
+    _, predict = torch.max(all_output, 1)
+    acc_s = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0]) * 100
+
+    if cfg.SETTING.DATASET == 'VISDA-C':
+        matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
+        acc = matrix.diagonal() / matrix.sum(axis=1) * 100
+        acc_list = ' '.join(str(np.round(i, 2)) for i in acc)
+        log_str = 'GSFDA: Task: {}, Source Accuracy = {:.2f}%'.format(cfg.name_src, acc_s) + '\n' + acc_list
+    else:
+        log_str = 'GSFDA: Task: {}, Source Accuracy = {:.2f}%'.format(cfg.name_src, acc_s)
+    logger.info(log_str)
+    netF.train()
+    netB.train()
+    netC.train()
+    return acc_s
