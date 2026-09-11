@@ -30,6 +30,15 @@ DIFF_ALIGN:
   USE_NEG: True
   LENT_PAR : 0.05
   MERGE_ADAPTIVE: True  # True=自适应融合, False=固定scale=0.1(同difo_plus)
+  # ---- adaptive-alpha 开关(消融实验,默认值=原行为) ----
+  MERGE_USE_CONFIDENCE: 1
+  MERGE_USE_STABILITY: 1
+  MERGE_USE_PRIOR_TERM: 1
+  MERGE_USE_LOSS_GAP: 1
+  MERGE_PRIOR_DIRECT: 0
+  MERGE_FIXED_ALPHA: -1.0
+  MERGE_LOSS_GAP_CLAMP: 5.0
+  MERGE_CLIP_USE_STABILITY: 0
 BRIDGE:
   ENABLE: True
   CP_INTERVAL: 1

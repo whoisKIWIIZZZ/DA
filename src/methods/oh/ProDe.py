@@ -13,7 +13,9 @@ from sklearn.metrics import confusion_matrix
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
-from src.utils.adaptive_alpha import adaptive_alpha_from_logits, gate_diagnostics, TargetLogitBank
+from src.utils.adaptive_alpha import (adaptive_alpha_from_logits,
+                                      disagreement_diagnostics,
+                                      gate_diagnostics, TargetLogitBank)
 logger = logging.getLogger(__name__)
 
 
@@ -256,6 +258,7 @@ def train_target(cfg):
     clip_loss_bank = torch.zeros(num_sample, device=logtis_bank.device)
     target_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
     clip_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    selected_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
     label_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
     alpha_sum = 0.0
     alpha_count = 0
@@ -350,6 +353,7 @@ def train_target(cfg):
                 clip_loss_bank[tar_idx] = clip_loss
             target_prediction_bank[tar_idx] = outputs_test_new.argmax(dim=1)
             clip_prediction_bank[tar_idx] = clip_score.argmax(dim=1)
+            selected_prediction_bank[tar_idx] = new_clip.argmax(dim=1)
             label_bank[tar_idx] = labels.to(label_bank.device).long()
         #     for name, t in [
    		#  ("outputs_test_new",   outputs_test_new),
@@ -408,10 +412,14 @@ def train_target(cfg):
                     clip_confidence_bank, target_stability_bank, clip_stability_bank,
                     prior_term_bank, reliability_term_bank, loss_term_bank,
                     loss_gap_bank, target_loss_bank, clip_loss_bank,
-                    alpha_observation_bank, cfg, section_name='ProDe'
+                    alpha_observation_bank, cfg, section_name='ProDe',
+                    selected_prediction=selected_prediction_bank
                 )
             else:
-                log_str += '\nGate: adaptive alpha disabled'
+                log_str += '\nGate: adaptive alpha disabled; ' + disagreement_diagnostics(
+                    target_prediction_bank, clip_prediction_bank,
+                    selected_prediction_bank, label_bank
+                )
 
             logger.info(log_str)
             netF.train()

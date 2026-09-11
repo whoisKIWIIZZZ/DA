@@ -259,6 +259,15 @@ _C.DIFO.MERGE_STABILITY_WEIGHT = 0.8
 _C.DIFO.MERGE_GATE_TEMPERATURE = 0.25
 _C.DIFO.MERGE_ROBUST_TEMPERATURE = 5.0
 _C.DIFO.MERGE_MIN_WEIGHT = 0.05
+# ---- adaptive-alpha ablation switches (see src/utils/adaptive_alpha.py) ----
+_C.DIFO.MERGE_USE_CONFIDENCE = 1     # 0=可靠性只用稳定性
+_C.DIFO.MERGE_USE_STABILITY = 1      # 0=可靠性只用置信度
+_C.DIFO.MERGE_USE_PRIOR_TERM = 1     # 0=去掉可靠性先验(只剩loss gap)
+_C.DIFO.MERGE_USE_LOSS_GAP = 1       # 0=去掉loss gap(只剩可靠性先验)
+_C.DIFO.MERGE_PRIOR_DIRECT = 0       # 1=关掉loss gap后直接用prior不做温度收缩
+_C.DIFO.MERGE_FIXED_ALPHA = -1.0     # [0,1]=固定alpha(0.5等权/1.0只用target/0.0只用clip)
+_C.DIFO.MERGE_LOSS_GAP_CLAMP = 5.0   # loss gap的截断宽度
+_C.DIFO.MERGE_CLIP_USE_STABILITY = 0 # 1=clip侧可靠性也加入clip_stability
 # --------------------------------- DIFFADD options ----------------------------- #
 _C.DIFFADD = CfgNode()
 
@@ -304,6 +313,15 @@ _C.DIFF_ALIGN.MERGE_ROBUST_TEMPERATURE = 5.0  # 越大越接近可靠性 prior
 _C.DIFF_ALIGN.MERGE_MIN_WEIGHT = 0.05
 _C.DIFF_ALIGN.MERGE_LOW_CONFIDENCE = 0.3  # 仅用于日志诊断
 _C.DIFF_ALIGN.MERGE_TARGET_EMA_DECAY = 0.9
+# ---- adaptive-alpha ablation switches (see src/utils/adaptive_alpha.py) ----
+_C.DIFF_ALIGN.MERGE_USE_CONFIDENCE = 1
+_C.DIFF_ALIGN.MERGE_USE_STABILITY = 1
+_C.DIFF_ALIGN.MERGE_USE_PRIOR_TERM = 1
+_C.DIFF_ALIGN.MERGE_USE_LOSS_GAP = 1
+_C.DIFF_ALIGN.MERGE_PRIOR_DIRECT = 0
+_C.DIFF_ALIGN.MERGE_FIXED_ALPHA = -1.0
+_C.DIFF_ALIGN.MERGE_LOSS_GAP_CLAMP = 5.0
+_C.DIFF_ALIGN.MERGE_CLIP_USE_STABILITY = 0
 
 # --------------------------------- BRIDGE options ----------------------------- #
 _C.BRIDGE = CfgNode()
@@ -342,6 +360,15 @@ _C.ProDe.MERGE_STABILITY_WEIGHT = 0.8
 _C.ProDe.MERGE_GATE_TEMPERATURE = 0.25
 _C.ProDe.MERGE_ROBUST_TEMPERATURE = 5.0
 _C.ProDe.MERGE_MIN_WEIGHT = 0.05
+# ---- adaptive-alpha ablation switches (see src/utils/adaptive_alpha.py) ----
+_C.ProDe.MERGE_USE_CONFIDENCE = 1
+_C.ProDe.MERGE_USE_STABILITY = 1
+_C.ProDe.MERGE_USE_PRIOR_TERM = 1
+_C.ProDe.MERGE_USE_LOSS_GAP = 1
+_C.ProDe.MERGE_PRIOR_DIRECT = 0
+_C.ProDe.MERGE_FIXED_ALPHA = -1.0
+_C.ProDe.MERGE_LOSS_GAP_CLAMP = 5.0
+_C.ProDe.MERGE_CLIP_USE_STABILITY = 0
 
 _C.LEARNABLE_NEG = CfgNode()
 _C.LEARNABLE_NEG.TRAIN = True

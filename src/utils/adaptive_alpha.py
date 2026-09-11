@@ -34,6 +34,21 @@ def adaptive_mix_weight(i, mi, q_target, q_clip, target_output, clip_history,
     q_target, q_clip and target_output must be probability distributions.  The
     function keeps the current diff-align gate convention so existing callers
     can migrate without changing their training behavior.
+
+    Ablation switches (all read from the method config section; defaults
+    reproduce the original behavior):
+      MERGE_USE_CONFIDENCE=0       -> reliability uses stability only
+      MERGE_USE_STABILITY=0        -> reliability uses confidence only
+      MERGE_USE_PRIOR_TERM=0       -> drop the reliability prior (loss gap only)
+      MERGE_USE_LOSS_GAP=0         -> drop the loss gap (prior only);
+                                      MERGE_PRIOR_DIRECT=1 additionally skips the
+                                      temperature shrink so alpha = prior
+      MERGE_FIXED_ALPHA in [0,1]   -> constant alpha (0.5 equal mix, 1.0
+                                      target-only, 0.0 clip-only)
+      MERGE_USE_OBSERVATION_PRIOR=1 -> enable observation-count prior bias
+      MERGE_LOSS_GAP_CLAMP         -> clamp width of the loss gap (was 5.0)
+      MERGE_CLIP_USE_STABILITY=1   -> clip reliability mirrors the target-side
+                                      combination (confidence + stability)
     """
     section = _section(cfg, section_name)
     target_confidence = normalized_confidence(q_target)
@@ -44,17 +59,50 @@ def adaptive_mix_weight(i, mi, q_target, q_clip, target_output, clip_history,
 
     confidence_weight = getattr(section, 'MERGE_CONFIDENCE_WEIGHT', 0.2)
     stability_weight = getattr(section, 'MERGE_STABILITY_WEIGHT', 0.8)
-    weight_sum = confidence_weight + stability_weight
-    target_reliability = (
-        confidence_weight * target_confidence + stability_weight * target_stability
-    ) / weight_sum
-    clip_reliability = clip_confidence
+    use_confidence = int(getattr(section, 'MERGE_USE_CONFIDENCE', 1)) == 1
+    use_stability = int(getattr(section, 'MERGE_USE_STABILITY', 1)) == 1
+    use_prior_term = int(getattr(section, 'MERGE_USE_PRIOR_TERM', 1)) == 1
+    use_loss_gap = int(getattr(section, 'MERGE_USE_LOSS_GAP', 1)) == 1
+    use_clip_stability = int(getattr(section, 'MERGE_CLIP_USE_STABILITY', 0)) == 1
+    fixed_alpha = float(getattr(section, 'MERGE_FIXED_ALPHA', -1.0))
 
-    # Keep the current implementation's scale: reliability and loss are
-    # combined in a bounded logit.  The old observation prior is represented
-    # explicitly and can be enabled by setting MERGE_USE_OBSERVATION_PRIOR=1.
-    use_prior = False#int(getattr(section, 'MERGE_USE_OBSERVATION_PRIOR', 0)) == 1
-    if use_prior:
+    # Target reliability: weighted combination of the enabled terms.  If both
+    # are disabled it collapses to the clip confidence so the prior stays
+    # neutral (0.5).
+    terms, term_weights = [], []
+    if use_confidence:
+        terms.append(target_confidence)
+        term_weights.append(confidence_weight)
+    if use_stability:
+        terms.append(target_stability)
+        term_weights.append(stability_weight)
+    if terms:
+        weight_sum = sum(term_weights)
+        target_reliability = sum(
+            w * t for w, t in zip(term_weights, terms)
+        ) / weight_sum
+    else:
+        target_reliability = clip_confidence
+    # Clip reliability defaults to confidence only; MERGE_CLIP_USE_STABILITY=1
+    # mirrors the target-side combination for the clip side.
+    clip_terms, clip_term_weights = [], []
+    if use_confidence:
+        clip_terms.append(clip_confidence)
+        clip_term_weights.append(confidence_weight)
+    if use_stability:
+        clip_terms.append(clip_stability)
+        clip_term_weights.append(stability_weight)
+    if use_clip_stability and clip_terms:
+        clip_reliability = sum(
+            w * t for w, t in zip(clip_term_weights, clip_terms)
+        ) / sum(clip_term_weights)
+    else:
+        clip_reliability = clip_confidence
+
+    # Observation-count prior bias.  Kept disabled by default for backward
+    # compatibility; enable with MERGE_USE_OBSERVATION_PRIOR=1.
+    use_observation_prior = int(getattr(section, 'MERGE_USE_OBSERVATION_PRIOR', 0)) == 1
+    if use_observation_prior:
         initial_target_weight = getattr(section, 'MERGE_INITIAL_TARGET_WEIGHT', 0.1)
         initial_logit = np.log(initial_target_weight / (1.0 - initial_target_weight))
         prior_bias = initial_logit * torch.exp(
@@ -63,15 +111,29 @@ def adaptive_mix_weight(i, mi, q_target, q_clip, target_output, clip_history,
     else:
         prior_bias = torch.zeros_like(target_reliability)
 
-    prior_logit = prior_bias + target_reliability - clip_reliability
+    if use_prior_term:
+        prior_logit = prior_bias + target_reliability - clip_reliability
+    else:
+        prior_logit = prior_bias
     min_weight = getattr(section, 'MERGE_MIN_WEIGHT', 0.05)
     prior = torch.sigmoid(prior_logit).clamp(min_weight, 1.0 - min_weight)
 
     loss_gap = clip_loss.detach() - target_loss.detach()
-    normalized_loss_gap = loss_gap.clamp(-5.0, 5.0)
+    loss_gap_clamp = float(getattr(section, 'MERGE_LOSS_GAP_CLAMP', 5.0))
+    normalized_loss_gap = loss_gap.clamp(-loss_gap_clamp, loss_gap_clamp)
     robust_temperature = getattr(section, 'MERGE_ROBUST_TEMPERATURE', 5.0)
-    robust_logit = (torch.logit(prior) + normalized_loss_gap) / robust_temperature
+    if use_loss_gap and use_prior_term:
+        robust_logit = (torch.logit(prior) + normalized_loss_gap) / robust_temperature
+    elif use_loss_gap:
+        robust_logit = normalized_loss_gap / robust_temperature
+    elif use_prior_term and int(getattr(section, 'MERGE_PRIOR_DIRECT', 0)) == 1:
+        robust_logit = torch.logit(prior)
+    else:
+        robust_logit = torch.logit(prior) / robust_temperature
     alpha = torch.sigmoid(robust_logit).clamp(min_weight, 1.0 - min_weight)
+
+    if 0.0 <= fixed_alpha <= 1.0:
+        alpha = torch.full_like(alpha, fixed_alpha)
 
     return (
         alpha.detach(), prior.detach(), target_confidence.detach(),
@@ -161,7 +223,8 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction,
                      clip_confidence, target_stability, clip_stability,
                      prior_term_bank, reliability_term_bank, loss_term_bank,
                      loss_gap_bank, target_loss_bank, clip_loss_bank,
-                     observation_count_bank, cfg, section_name=None):
+                     observation_count_bank, cfg, section_name=None,
+                     selected_prediction=None):
     """Summarize adaptive-alpha gate behavior over observed samples.
 
     All arguments are per-sample tensors indexed by the dataset sample id.
@@ -180,7 +243,10 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction,
     target_correct = target_prediction == labels
     clip_correct = clip_prediction == labels
     disagreement = target_prediction != clip_prediction
-    selected_prediction = torch.where(alpha >= 0.5, target_prediction, clip_prediction)
+    if selected_prediction is None:
+        selected_prediction = torch.where(alpha >= 0.5, target_prediction, clip_prediction)
+    else:
+        selected_prediction = selected_prediction[valid]
     quantiles = torch.quantile(alpha, torch.tensor([0.1, 0.5, 0.9], device=alpha.device))
 
     target_only = target_correct & ~clip_correct
@@ -248,6 +314,33 @@ def gate_diagnostics(alpha_bank, alpha_seen, prior_bank, target_prediction,
         gap_stats[0], gap_stats[2], observation_stats[0], observation_stats[2],
         target_loss_stats[0], clip_loss_stats[0], target_loss_stats[2], clip_loss_stats[2]
     )
+
+
+def disagreement_diagnostics(target_prediction, clip_prediction,
+                             selected_prediction, label_bank):
+    valid = ((label_bank >= 0) & (target_prediction >= 0) &
+             (clip_prediction >= 0) & (selected_prediction >= 0))
+    if not valid.any():
+        return 'disagree: no observations'
+
+    target_prediction = target_prediction[valid]
+    clip_prediction = clip_prediction[valid]
+    selected_prediction = selected_prediction[valid]
+    labels = label_bank[valid]
+    disagreement = target_prediction != clip_prediction
+    disagree_rate = disagreement.float().mean().item() * 100
+
+    if disagreement.any():
+        target_acc = (target_prediction[disagreement] == labels[disagreement]).float().mean().item() * 100
+        clip_acc = (clip_prediction[disagreement] == labels[disagreement]).float().mean().item() * 100
+        selected_acc = (selected_prediction[disagreement] == labels[disagreement]).float().mean().item() * 100
+    else:
+        target_acc = clip_acc = selected_acc = float('nan')
+
+    return (
+        'disagree={:.1f}%; '
+        'disagree acc target/clip/selected={:.2f}%/{:.2f}%/{:.2f}%'
+    ).format(disagree_rate, target_acc, clip_acc, selected_acc)
 
 
 

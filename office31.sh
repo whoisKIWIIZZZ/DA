@@ -7,8 +7,8 @@ echo METHOD: $METHOD
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
-s_list=(0 1 2)
-t_list=(0 1 2)
+s_list=(1)
+t_list=(0)
 # fi
 for s in ${s_list[*]}; do
     for t in ${t_list[*]}; do
@@ -16,7 +16,7 @@ for s in ${s_list[*]}; do
         then
         continue
     fi
-        CUDA_VISIBLE_DEVICES=3 /home/yishouzhuo/miniconda3/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
+        CUDA_VISIBLE_DEVICES=1 /home/yishouzhuo/miniconda3/envs/sfa/bin/python image_target_of_oh_vs_new.py --cfg "cfgs/${DATASET}/${METHOD}.yaml" \
             SETTING.S "$s" SETTING.T "$t" 
         wait
     done

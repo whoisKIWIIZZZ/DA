@@ -12,6 +12,7 @@ from sklearn.metrics import confusion_matrix
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
+from src.utils.adaptive_alpha import disagreement_diagnostics
 logger = logging.getLogger(__name__)
 
 
@@ -206,6 +207,10 @@ def train_target(cfg):
     iter_num = 0
     num_sample=len(dset_loaders["target"].dataset)
     logtis_bank = torch.randn(num_sample, cfg.class_num).cuda()
+    target_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    clip_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    selected_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
+    label_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
 
     loader = dset_loaders["source"]
     with torch.no_grad():
@@ -222,10 +227,10 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
         if inputs_test.size(0) == 1:
             continue
 
@@ -251,6 +256,10 @@ def train_target(cfg):
 
         with torch.no_grad():
             new_clip = (outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
+            target_prediction_bank[tar_idx] = outputs_test_new.argmax(dim=1)
+            clip_prediction_bank[tar_idx] = clip_score.argmax(dim=1)
+            selected_prediction_bank[tar_idx] = new_clip.argmax(dim=1)
+            label_bank[tar_idx] = labels.to(label_bank.device).long()
             clip_score_sm = nn.Softmax(dim=1)(new_clip)
         
         _,clip_index_new = torch.max(new_clip, 1)
@@ -286,6 +295,11 @@ def train_target(cfg):
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
+
+            log_str += '\n' + disagreement_diagnostics(
+                target_prediction_bank, clip_prediction_bank,
+                selected_prediction_bank, label_bank
+            )
 
             logger.info(log_str)
             netF.train()

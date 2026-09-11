@@ -15,8 +15,8 @@ OPTIM:
   NESTEROV: TRUE
 TEST:
   BATCH_SIZE: 64
-  MAX_EPOCH: 30
-  INTERVAL: 30
+  MAX_EPOCH: 15
+  INTERVAL: 15
 DIFO:
   CLS_PAR: 0.4
   EPSILON : 1e-5
@@ -36,3 +36,12 @@ DIFO:
   MERGE_GATE_TEMPERATURE: 0.25
   MERGE_ROBUST_TEMPERATURE: 5.0
   MERGE_MIN_WEIGHT: 0.05
+  # ---- adaptive-alpha 开关(消融实验,默认值=原行为) ----
+  MERGE_USE_CONFIDENCE: 1     # 0=可靠性只用稳定性(消融#2)
+  MERGE_USE_STABILITY: 1      # 0=可靠性只用置信度(消融#3)
+  MERGE_USE_PRIOR_TERM: 1     # 0=去掉可靠性先验(消融#5)
+  MERGE_USE_LOSS_GAP: 1       # 0=去掉loss gap(消融#4)
+  MERGE_PRIOR_DIRECT: 0
+  MERGE_FIXED_ALPHA: -1.0     # [0,1]=固定alpha
+  MERGE_LOSS_GAP_CLAMP: 5.0
+  MERGE_CLIP_USE_STABILITY: 0

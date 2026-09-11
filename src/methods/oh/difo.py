@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
-from src.utils.adaptive_alpha import adaptive_mix_weight, test_on_source
+from src.utils.adaptive_alpha import adaptive_mix_weight, gate_diagnostics, test_on_source
 from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
@@ -188,6 +188,13 @@ def train_target(cfg):
     clip_score_bank = torch.zeros(num_sample, cfg.class_num).cuda()
     clip_score_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
     gate_observation_bank = torch.zeros(num_sample, device=score_bank.device)
+    alpha_bank = torch.zeros(num_sample, device=score_bank.device)
+    alpha_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
+    target_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=score_bank.device)
+    clip_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=score_bank.device)
+    selected_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=score_bank.device)
+    label_bank = torch.full((num_sample,), -1, dtype=torch.long, device=score_bank.device)
+    detail_banks = [torch.zeros(num_sample, device=score_bank.device) for _ in range(12)]
     netF.eval()
     netB.eval()
     netC.eval()
@@ -210,10 +217,10 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
 
         if inputs_test.size(0) == 1:
             continue
@@ -240,10 +247,10 @@ def train_target(cfg):
         # 自适应 per-sample target/clip 混合权重(替代随机指数分布,逻辑同 diff_new_opt_new_plus)
         q_target = score_bank[tar_idx].detach()
         q_clip = clip_all_output[tar_idx][:, :cfg.class_num].detach()
-        log_prob = F.log_softmax(outputs_test, dim=1)
+        log_prob = outputs_test#F.log_softmax(outputs_test, dim=1)
         target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
         clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
-        alpha = adaptive_mix_weight(
+        details = adaptive_mix_weight(
             iter_num, max_iter,
             q_target,
             q_clip,
@@ -254,7 +261,8 @@ def train_target(cfg):
             target_loss_per_sample,
             clip_loss_per_sample,
             cfg, section_name='DIFO'
-        )[0]
+        )
+        alpha = details[0]
         predict_mix = alpha.unsqueeze(1) * q_target + (1.0 - alpha.unsqueeze(1)) * q_clip
 
         if cfg.DIFO.CLS_PAR > 0:
@@ -271,6 +279,14 @@ def train_target(cfg):
         gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + cfg.LCFD.EPSILON))
         classifier_loss = classifier_loss - cfg.DIFO.GENT_PAR * gentropy_loss
         with torch.no_grad():
+            target_prediction_bank[tar_idx] = q_target.argmax(dim=1)
+            clip_prediction_bank[tar_idx] = q_clip.argmax(dim=1)
+            selected_prediction_bank[tar_idx] = predict_mix.argmax(dim=1)
+            label_bank[tar_idx] = labels.to(label_bank.device).long()
+            alpha_bank[tar_idx] = alpha
+            alpha_seen[tar_idx] = True
+            for bank, value in zip(detail_banks, details[1:]):
+                bank[tar_idx] = value
             score_bank[tar_idx] = softmax_out.detach().clone()
             clip_score_bank[tar_idx] = q_clip
             clip_score_seen[tar_idx] = True
@@ -291,6 +307,14 @@ def train_target(cfg):
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={};alpha={:.3f}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss,alpha.mean().item())
 
+            log_str += '\n' + gate_diagnostics(
+                alpha_bank, alpha_seen, detail_banks[0],
+                target_prediction_bank, clip_prediction_bank, label_bank,
+                detail_banks[1], detail_banks[2], detail_banks[3], detail_banks[4],
+                detail_banks[5], detail_banks[6], detail_banks[7], detail_banks[8],
+                detail_banks[10], detail_banks[11], gate_observation_bank,
+                cfg, section_name='DIFO', selected_prediction=selected_prediction_bank
+            )
             logger.info(log_str)
             
             netF.train()

@@ -81,7 +81,11 @@ if __name__ == "__main__":
         if cfg.DA == 'pda':
             cfg.class_num = 65
             cfg.src_classes = [i for i in range(65)]
-            cfg.tar_classes = [i for i in range(25)]
+            cfg.tar_classes = [
+    27, 31, 43, 8, 59, 17, 57, 62, 12, 5,
+    58, 4, 32, 45, 35, 41, 21, 23, 25, 40,
+    44, 37, 20, 13, 10
+]
         elif cfg.DA == 'open':
             cfg.class_num = 26
             cfg.src_classes = [i for i in range(25)]
@@ -149,7 +153,7 @@ if __name__ == "__main__":
     
     elif cfg.MODEL.METHOD == "ProDe":
         print("using ProDe method")
-        acc = ProDe_old.train_target(cfg)
+        acc = ProDe.train_target(cfg)
 
     elif cfg.MODEL.METHOD == "ProDe_diff":
         print("using ProDe+diff method (with negative classes)")
