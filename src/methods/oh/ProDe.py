@@ -10,6 +10,7 @@ from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
 from sklearn.metrics import confusion_matrix
+from sklearn.cluster import KMeans
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
@@ -99,7 +100,7 @@ def lr_scheduler(optimizer, iter_num, max_iter, gamma=10, power=0.75):
         param_group['nesterov'] = True
     return optimizer
 
-def cal_acc(loader, netF, netB, netC, flag=False):
+def cal_acc(loader, netF, netB, netC, cfg, flag=False, evaluate_open_set=True):
     start_test = True
     with torch.no_grad():
         iter_test = iter(loader)
@@ -117,9 +118,35 @@ def cal_acc(loader, netF, netB, netC, flag=False):
                 all_output = torch.cat((all_output, outputs.float().cpu()), 0)
                 all_label = torch.cat((all_label, labels.float()), 0)
 
-    _, predict = torch.max(all_output, 1)
+    probabilities = nn.Softmax(dim=1)(all_output)
+    _, predict = torch.max(probabilities, 1)
+    if cfg.DA == 'open' and evaluate_open_set:
+        entropy = torch.sum(
+            -probabilities * torch.log(probabilities + cfg.ProDe.EPSILON), dim=1
+        ) / np.log(cfg.class_num)
+        centers = np.array([[0.0], [1.0]])
+        threshold = KMeans(
+            n_clusters=2, random_state=0, init=centers, n_init=1
+        ).fit(entropy.numpy().reshape(-1, 1)).cluster_centers_.mean()
+        predict[entropy > threshold] = cfg.class_num
+
+        labels = np.arange(cfg.class_num + 1)
+        matrix = confusion_matrix(all_label.numpy(), predict.numpy(), labels=labels)
+        per_class_acc = np.divide(
+            matrix.diagonal(), matrix.sum(axis=1),
+            out=np.zeros(cfg.class_num + 1, dtype=float),
+            where=matrix.sum(axis=1) != 0,
+        ) * 100
+        known_acc = per_class_acc[:-1].mean()
+        unknown_acc = per_class_acc[-1]
+        os_acc = per_class_acc.mean()
+        h_score = 0.0
+        if known_acc + unknown_acc > 0:
+            h_score = 2 * known_acc * unknown_acc / (known_acc + unknown_acc)
+        return os_acc, known_acc, unknown_acc, h_score
+
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
-    mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
+    mean_ent = torch.mean(loss.Entropy(probabilities)).cpu().data.item()
 
     if flag:
         matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
@@ -150,10 +177,16 @@ def test_on_source(cfg, netF, netB, netC, dset_loaders):
     netB.eval()
     netC.eval()
     if cfg.SETTING.DATASET == 'VISDA-C':
-        acc_s, acc_list = cal_acc(dset_loaders['source_test'], netF, netB, netC, True)
+        acc_s, acc_list = cal_acc(
+            dset_loaders['source_test'], netF, netB, netC, cfg, True,
+            evaluate_open_set=False,
+        )
         log_str = 'GSFDA: Task: {}, Source Accuracy = {:.2f}%'.format(cfg.name_src, acc_s) + '\n' + acc_list
     else:
-        acc_s, _ = cal_acc(dset_loaders['source_test'], netF, netB, netC, False)
+        acc_s, _ = cal_acc(
+            dset_loaders['source_test'], netF, netB, netC, cfg, False,
+            evaluate_open_set=False,
+        )
         log_str = 'GSFDA: Task: {}, Source Accuracy = {:.2f}%'.format(cfg.name_src, acc_s)
     logger.info(log_str)
     netF.train()
@@ -286,6 +319,8 @@ def train_target(cfg):
         num_sample, cfg.class_num, logtis_bank.device, init_logits=logtis_bank
     )
 
+    if cfg.SETTING.DATASET == "office":
+        print("HOW")
     while iter_num < max_iter:
         try:
             (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
@@ -297,6 +332,9 @@ def train_target(cfg):
 
         inputs_test = inputs_test.cuda()
         inputs_test_augs = inputs_test_augs.cuda()
+
+        if cfg.SETTING.DATASET == "office":
+            inputs_test_augs = inputs_test #give clip right aug in different datasets
 
         iter_num += 1
         lr_scheduler(optimizer, iter_num=iter_num, max_iter=max_iter)
@@ -397,11 +435,19 @@ def train_target(cfg):
             netB.eval()
             netC.eval()
             if cfg.SETTING.DATASET=='VISDA-C':
-                acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
+                acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, cfg, True)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss) + '\n' + acc_list
             else:
-                acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
+                metrics = cal_acc(dset_loaders['test'], netF, netB, netC, cfg, False)
+                if cfg.DA == 'open':
+                    os_acc, known_acc, unknown_acc, h_score = metrics
+                    log_str = ('Task: {}, Iter:{}/{}; OS={:.2f}%; OS*={:.2f}%; '
+                               'UNK={:.2f}%; H={:.2f}%; loss={}').format(
+                        cfg.name, iter_num, max_iter, os_acc, known_acc,
+                        unknown_acc, h_score, classifier_loss)
+                else:
+                    acc_s_te, _ = metrics
+                    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
 
             if alpha_count > 0:
                 log_str += '; alpha_mean={:.4f}'.format(alpha_sum / alpha_count)
@@ -449,7 +495,7 @@ def clip_pre_text(cfg):
         for line in f:
             List_rd.extend([i for i in line.split()])
     f.close()
-    classnames = List_rd
+    classnames = List_rd[:cfg.class_num] if cfg.DA == 'open' else List_rd
     classnames = [name.replace("_", " ") for name in classnames]
     cfg.classname = classnames
     prompt_prefix = cfg.ProDe.CTX_INIT.replace("_"," ")

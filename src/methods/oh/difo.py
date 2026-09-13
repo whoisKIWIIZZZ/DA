@@ -11,6 +11,7 @@ from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
 from sklearn.metrics import confusion_matrix
+from sklearn.cluster import KMeans
 import clip
 from src.utils.utils import *
 logger = logging.getLogger(__name__)
@@ -94,7 +95,7 @@ def lr_scheduler(optimizer, iter_num, max_iter, gamma=10, power=0.75):
         param_group['nesterov'] = True
     return optimizer
 
-def cal_acc(loader, netF, netB, netC, flag=False):
+def cal_acc(loader, netF, netB, netC, cfg, flag=False):
     start_test = True
     with torch.no_grad():
         iter_test = iter(loader)
@@ -112,9 +113,35 @@ def cal_acc(loader, netF, netB, netC, flag=False):
                 all_output = torch.cat((all_output, outputs.float().cpu()), 0)
                 all_label = torch.cat((all_label, labels.float()), 0)
 
-    _, predict = torch.max(all_output, 1)
+    probabilities = nn.Softmax(dim=1)(all_output)
+    _, predict = torch.max(probabilities, 1)
+    if cfg.DA == 'open':
+        entropy = torch.sum(
+            -probabilities * torch.log(probabilities + cfg.DIFO.EPSILON), dim=1
+        ) / np.log(cfg.class_num)
+        centers = np.array([[0.0], [1.0]])
+        threshold = KMeans(
+            n_clusters=2, random_state=0, init=centers, n_init=1
+        ).fit(entropy.numpy().reshape(-1, 1)).cluster_centers_.mean()
+        predict[entropy > threshold] = cfg.class_num
+
+        labels = np.arange(cfg.class_num + 1)
+        matrix = confusion_matrix(all_label.numpy(), predict.numpy(), labels=labels)
+        per_class_acc = np.divide(
+            matrix.diagonal(), matrix.sum(axis=1),
+            out=np.zeros(cfg.class_num + 1, dtype=float),
+            where=matrix.sum(axis=1) != 0,
+        ) * 100
+        known_acc = per_class_acc[:-1].mean()
+        unknown_acc = per_class_acc[-1]
+        os_acc = per_class_acc.mean()
+        h_score = 0.0
+        if known_acc + unknown_acc > 0:
+            h_score = 2 * known_acc * unknown_acc / (known_acc + unknown_acc)
+        return os_acc, known_acc, unknown_acc, h_score
+
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
-    mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
+    mean_ent = torch.mean(loss.Entropy(probabilities)).cpu().data.item()
 
     if flag:
         matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
@@ -229,7 +256,7 @@ def train_target(cfg):
             netF.eval()
             netB.eval()
             netC.eval()
-            confi_imag,confi_dis,clip_all_output = obtain_label(dset_loaders['test'], netF, netB, netC,text_inputs,text_features,clip_model)
+            confi_imag,confi_dis,clip_all_output = obtain_label(cfg,dset_loaders['test'], netF, netB, netC,text_inputs,text_features,clip_model)
             clip_all_output = clip_all_output.cuda()
             text_features = prompt_tuning.prompt_main(cfg,confi_imag,confi_dis,iter_num)
             cfg.load = 'prompt_model.pt'
@@ -244,10 +271,10 @@ def train_target(cfg):
         outputs_test = netC(features_test)
         softmax_out = nn.Softmax(dim=1)(outputs_test)
 
-        # 自适应 per-sample target/clip 混合权重(替代随机指数分布,逻辑同 diff_new_opt_new_plus)
+        
         q_target = score_bank[tar_idx].detach()
         q_clip = clip_all_output[tar_idx][:, :cfg.class_num].detach()
-        log_prob = outputs_test#F.log_softmax(outputs_test, dim=1)
+        log_prob = outputs_test if cfg.SETTING.DATASET == "office" or cfg.DA != "uda" else F.log_softmax(outputs_test, dim=1) 
         target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
         clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
         details = adaptive_mix_weight(
@@ -301,11 +328,20 @@ def train_target(cfg):
             netB.eval()
           #  cal_acc_js(dset_loaders['test'],netF,netB,netC,clip_all_output)
             if cfg.SETTING.DATASET=='VISDA-C':
-                acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
+                acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, cfg, True)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={};alpha={:.3f}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss,alpha.mean().item()) + '\n' + acc_list
             else:
-                acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={};alpha={:.3f}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss,alpha.mean().item())
+                metrics = cal_acc(dset_loaders['test'], netF, netB, netC, cfg, False)
+                if cfg.DA == 'open':
+                    os_acc, known_acc, unknown_acc, h_score = metrics
+                    log_str = ('Task: {}, Iter:{}/{}; OS={:.2f}%; OS*={:.2f}%; '
+                               'UNK={:.2f}%; H={:.2f}%; loss={}; iic={}; alpha={:.3f}').format(
+                        cfg.name, iter_num, max_iter, os_acc, known_acc,
+                        unknown_acc, h_score, classifier_loss, iic_loss,
+                        alpha.mean().item())
+                else:
+                    acc_s_te, _ = metrics
+                    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={};iic={};alpha={:.3f}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss,iic_loss,alpha.mean().item())
 
             log_str += '\n' + gate_diagnostics(
                 alpha_bank, alpha_seen, detail_banks[0],
@@ -338,14 +374,14 @@ def print_cfg(cfg):
     return s
 
 
-def obtain_label(loader, netF, netB, netC,text_inputs,text_features,clip_model):
+def obtain_label(cfg,loader, netF, netB, netC,text_inputs,text_features,clip_model):
     start_test = True
     with torch.no_grad():
         iter_test = iter(loader)
         for _ in range(len(loader)):
             data = next(iter_test)
             inputs = data[0][0]
-            inputs_clip = data[0][1]
+            inputs_clip = data[0][0] if cfg.SETTING.DATASET == "office31" else data[0][1]
             labels = data[1]
             inputs = inputs.cuda()
             inputs_clip = inputs_clip.cuda()
@@ -388,7 +424,7 @@ def clip_pre_text(cfg):
         for line in f:
             List_rd.extend([i for i in line.split()])
     f.close()
-    classnames = List_rd
+    classnames = List_rd[:cfg.class_num] if cfg.DA == 'open' else List_rd
     classnames = [name.replace("_", " ") for name in classnames]
     cfg.classname = classnames
     prompt_prefix = cfg.DIFO.CTX_INIT.replace("_"," ")

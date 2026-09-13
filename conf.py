@@ -134,6 +134,8 @@ _C.SOURCE = CfgNode()
 
 _C.SOURCE.EPSILON = 1e-5
 
+_C.SOURCE.SMOOTH = 0.1
+
 _C.SOURCE.TRTE = 'val'
 # --------------------------------- NRC options --------------------------- #
 _C.NRC = CfgNode()

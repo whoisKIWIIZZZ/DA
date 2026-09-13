@@ -1,5 +1,5 @@
 DATASET="office" # imagenet_c domainnet126 officehome
-METHOD="difo"          # shot nrc plue difo
+METHOD="diff_align"          # shot nrc plue difo
 export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 echo DATASET: $DATASET
 echo METHOD: $METHOD
@@ -7,8 +7,8 @@ echo METHOD: $METHOD
 
 # source_free_adaptation() {
 # if [ "$DATASET" == "office-home" ];then
-s_list=(1)
-t_list=(0)
+s_list=(0 1 2)
+t_list=(0 1 2)
 # fi
 for s in ${s_list[*]}; do
     for t in ${t_list[*]}; do

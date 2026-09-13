@@ -30,3 +30,7 @@ DIFO:
   LOAD : None
   IIC_PAR: 1.0
   GENT_PAR : 1.0
+  MERGE_USE_CONFIDENCE: 1     # 0=可靠性只用稳定性(消融#2)
+  MERGE_USE_STABILITY: 1      # 0=可靠性只用置信度(消融#3)
+  MERGE_USE_PRIOR_TERM: 1     # 0=去掉可靠性先验(消融#5)
+  MERGE_USE_LOSS_GAP: 1       # 0=去掉loss gap(消融#4)

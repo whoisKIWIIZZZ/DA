@@ -87,11 +87,11 @@ if __name__ == "__main__":
     44, 37, 20, 13, 10
 ]
         elif cfg.DA == 'open':
-            cfg.class_num = 26
+            cfg.class_num = 25 if cfg.MODEL.METHOD in ('source', 'difo', 'ProDe') else 26
             cfg.src_classes = [i for i in range(25)]
             cfg.tar_classes = [i for i in range(65)]
         # pda/open use the closed-set (uda) source model
-        if cfg.DA in ('pda', 'open'):
+        if cfg.DA in ('pda', 'open') and cfg.MODEL.METHOD not in ('source', 'difo', 'ProDe'):
             cfg.output_dir_src = cfg.output_dir_src.replace('/' + cfg.DA + '/', '/uda/')
 
     if cfg.MODEL.METHOD == "nrc":

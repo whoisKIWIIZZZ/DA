@@ -1,4 +1,5 @@
 import os.path as osp
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -140,12 +141,12 @@ def cal_acc(loader, netF, netB, netC, flag=False):
     else:
         return accuracy*100, mean_ent
 
-def cal_acc_oda(cfg,loader, netF, netB, netC):
+def cal_acc_oda(cfg, loader, netF, netB, netC):
     start_test = True
     with torch.no_grad():
         iter_test = iter(loader)
         for i in range(len(loader)):
-            data = iter_test.next()
+            data = next(iter_test)
             inputs = data[0]
             labels = data[1]
             inputs = inputs.cuda()
@@ -160,28 +161,30 @@ def cal_acc_oda(cfg,loader, netF, netB, netC):
 
     all_output = nn.Softmax(dim=1)(all_output)
     _, predict = torch.max(all_output, 1)
-    ent = torch.sum(-all_output * torch.log(all_output + cfg.epsilon), dim=1) / np.log(cfg.class_num)
+    known_class_num = all_output.size(1)
+    ent = torch.sum(-all_output * torch.log(all_output + cfg.SOURCE.EPSILON), dim=1) / np.log(known_class_num)
     ent = ent.float().cpu()
     initc = np.array([[0], [1]])
     kmeans = KMeans(n_clusters=2, random_state=0, init=initc, n_init=1).fit(ent.reshape(-1,1))
     threshold = (kmeans.cluster_centers_).mean()
 
-    predict[ent>threshold] = cfg.class_num
-    matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
-    matrix = matrix[np.unique(all_label).astype(int),:]
+    predict[ent > threshold] = known_class_num
+    labels = np.arange(known_class_num + 1)
+    matrix = confusion_matrix(all_label.numpy(), predict.numpy(), labels=labels)
 
-    acc = matrix.diagonal()/matrix.sum(axis=1) * 100
+    acc = np.divide(
+        matrix.diagonal(), matrix.sum(axis=1),
+        out=np.zeros(known_class_num + 1, dtype=float),
+        where=matrix.sum(axis=1) != 0,
+    ) * 100
     unknown_acc = acc[-1:].item()
 
     return np.mean(acc[:-1]), np.mean(acc), unknown_acc
     # return np.mean(acc), np.mean(acc[:-1])
 
 def train_source(cfg):
-    cfg.output_dir_src = './source'
     if not osp.exists(cfg.output_dir_src):
-        os.system('mkdir -p ' + cfg.output_dir_src)
-    if not osp.exists(cfg.output_dir_src):
-        os.mkdir(cfg.output_dir_src)
+        os.makedirs(cfg.output_dir_src)
 
     dset_loaders = data_load(cfg)
     ## set base network
@@ -206,7 +209,7 @@ def train_source(cfg):
 
     acc_init = 0
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["source_tr"])
-    interval_iter = max_iter // 10
+    interval_iter = max(1, max_iter // 10)
     iter_num = 0
 
     netF.train()
@@ -228,7 +231,7 @@ def train_source(cfg):
 
         inputs_source, labels_source = inputs_source.cuda(), labels_source.cuda()
         outputs_source = netC(netB(netF(inputs_source)))
-        classifier_loss = CrossEntropyLabelSmooth(num_classes=cfg.class_num, epsilon=cfg.SOURCE.EPSILON)(outputs_source, labels_source)            
+        classifier_loss = CrossEntropyLabelSmooth(num_classes=cfg.class_num, epsilon=cfg.SOURCE.SMOOTH)(outputs_source, labels_source)
         
         optimizer.zero_grad()
         classifier_loss.backward()
@@ -248,9 +251,9 @@ def train_source(cfg):
 
             if acc_s_te >= acc_init:
                 acc_init = acc_s_te
-                best_netF = netF.state_dict()
-                best_netB = netB.state_dict()
-                best_netC = netC.state_dict()
+                best_netF = copy.deepcopy(netF.state_dict())
+                best_netB = copy.deepcopy(netB.state_dict())
+                best_netC = copy.deepcopy(netC.state_dict())
 
             netF.train()
             netB.train()
@@ -290,8 +293,8 @@ def test_target(cfg):
         cfg.test_dset_path = cfg.FOLDER + cfg.SETTING.DATASET + '/' + cfg.domain[cfg.SETTING.T] + '_list.txt'
         cfg.name = cfg.domain[cfg.SETTING.S][0].upper()+cfg.domain[cfg.SETTING.T][0].upper()
         dset_loaders = data_load(cfg)
-        if cfg.DA == 'oda':
-            acc_os1, acc_os2, acc_unknown = cal_acc_oda(dset_loaders['test'], netF, netB, netC)
+        if cfg.DA in ('oda', 'open'):
+            acc_os1, acc_os2, acc_unknown = cal_acc_oda(cfg, dset_loaders['test'], netF, netB, netC)
             log_str = '\nTraining: {}, Task: {}, Accuracy = {:.2f}% / {:.2f}% / {:.2f}%'.format(cfg.SOURCE.TRTE, cfg.name, acc_os2, acc_os1, acc_unknown)
         else:
             if cfg.SETTING.DATASET=='VISDA-C':
