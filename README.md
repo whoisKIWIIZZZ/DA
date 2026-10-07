@@ -96,15 +96,41 @@ CUDA_VISIBLE_DEVICES=0 python image_target_in_126.py --cfg "cfgs/domainnet126/di
 ```
 
 To run Office-Home A→C with ProDe adaptive alpha and a zero-initialized,
-class-specific text-feature delta, use the dedicated script. It uses the
-`sfa` environment and writes checkpoints under `output/prode_text_feature_ac`.
+class-specific text-feature delta, use the dedicated script. The text-feature
+objective uses reliability-gated, class-aligned distillation: target-model
+probabilities supervise samples where the source model and initial CLIP agree,
+while initial CLIP probabilities preserve the visual-language prior on
+model-disagreement samples.
 ```bash
 bash run_prode_text_feature_ac.sh
 ```
+Run all twelve directed Office-Home domain pairs serially with the
+reliability-gated objective:
+```bash
+bash run_prode_text_feature_12tasks.sh
+```
+Run the paired twelve-domain control with the original IIC objective:
+```bash
+bash run_prode_text_feature_iic_12tasks.sh
+```
+Run both twelve-domain sets consecutively on one GPU with:
+```bash
+bash run_prode_text_feature_both_12tasks.sh
+```
+All scripts use the `sfa` environment. Each twelve-task runner records a
+resume marker after every successful task. Combined logs are written to
+`output/prode_text_feature_reliable_12tasks/runner.log` and
+`output/prode_text_feature_iic_12tasks/runner.log`.
+
 Set `ProDe.TUNE_TEXT_FEATURES=1` to optimize the normalized CLIP text
-features directly. `ProDe.TEXT_FEATURE_ANCHOR_WEIGHT` controls cosine
-regularization to the initial CLIP features, and `ProDe.TEXT_FEATURE_LOAD`
-loads a previously saved `text_features_ProDe.pt` checkpoint.
+features directly. `TEXT_FEATURE_IIC_WEIGHT` and
+`TEXT_FEATURE_DISTILL_WEIGHT` control the IIC and class-aligned terms;
+`TEXT_FEATURE_RELIABILITY_TEMPERATURE` controls the reliability gate;
+`TEXT_FEATURE_REQUIRE_AGREEMENT` restricts target supervision to samples
+where the target and initial CLIP predictions agree; `TEXT_FEATURE_ANCHOR_WEIGHT`
+controls cosine regularization to the initial
+CLIP features. `ProDe.TEXT_FEATURE_LOAD` loads a previously saved
+`text_features_ProDe.pt` checkpoint.
 
 ## Acknowledgements
 + SHOT [official](https://github.com/tim-learn/SHOT)

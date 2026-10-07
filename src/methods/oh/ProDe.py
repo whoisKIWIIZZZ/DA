@@ -3,6 +3,7 @@ import os.path as osp
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
@@ -16,7 +17,8 @@ import clip
 from src.utils.utils import *
 from src.utils.adaptive_alpha import (adaptive_alpha_from_logits,
                                       disagreement_diagnostics,
-                                      gate_diagnostics, TargetLogitBank)
+                                      gate_diagnostics, normalized_confidence,
+                                      TargetLogitBank)
 from src.utils.class_fraction import first_per_class
 logger = logging.getLogger(__name__)
 
@@ -200,18 +202,52 @@ def test_on_source(cfg, netF, netB, netC, dset_loaders):
 
 
 def test_time_tuning(model, inputs, optimizer, cfg, target_output):
-    target_output = target_output.cuda()
-    target_output =  nn.Softmax(dim=1)(target_output)
+    target_output = nn.Softmax(dim=1)(target_output.cuda()).detach()
+    tune_text_features = int(getattr(cfg.ProDe, 'TUNE_TEXT_FEATURES', 0)) == 1
     for j in range(cfg.ProDe.TTA_STEPS):
         with torch.amp.autocast('cuda'):
-            output_logits,_ = model(inputs)             
+            if tune_text_features:
+                output_logits, initial_logits = model.text_feature_tuning_logits(inputs)
+            else:
+                output_logits, _ = model(inputs)
+                initial_logits = None
             output = nn.Softmax(dim=1)(output_logits)
             iic_loss = IID_losses.IID_loss_old(output, target_output)
-        tuning_loss = iic_loss
-        if int(getattr(cfg.ProDe, 'TUNE_TEXT_FEATURES', 0)) == 1:
-            tuning_loss = tuning_loss + (
-                cfg.ProDe.TEXT_FEATURE_ANCHOR_WEIGHT * model.text_feature_anchor_loss()
+
+        if tune_text_features:
+            initial_probabilities = F.softmax(initial_logits.float(), dim=1)
+            target_confidence = normalized_confidence(target_output)
+            initial_confidence = normalized_confidence(initial_probabilities)
+            reliability_temperature = max(
+                float(cfg.ProDe.TEXT_FEATURE_RELIABILITY_TEMPERATURE), 1e-6
             )
+            target_weight = torch.sigmoid(
+                (target_confidence - initial_confidence) / reliability_temperature
+            )
+            agreement = (
+                target_output.argmax(dim=1) == initial_probabilities.argmax(dim=1)
+            ).float()
+            if int(cfg.ProDe.TEXT_FEATURE_REQUIRE_AGREEMENT) == 1:
+                target_weight = target_weight * agreement
+            target_weight = target_weight.detach()
+            teacher_probabilities = (
+                target_weight.unsqueeze(1) * target_output
+                + (1.0 - target_weight.unsqueeze(1)) * initial_probabilities
+            ).detach()
+            distill_loss = -(
+                teacher_probabilities * F.log_softmax(output_logits.float(), dim=1)
+            ).sum(dim=1).mean()
+            tuning_loss = (
+                cfg.ProDe.TEXT_FEATURE_IIC_WEIGHT * iic_loss
+                + cfg.ProDe.TEXT_FEATURE_DISTILL_WEIGHT * distill_loss
+                + cfg.ProDe.TEXT_FEATURE_ANCHOR_WEIGHT * model.text_feature_anchor_loss()
+            )
+            model.last_text_target_weight = target_weight.mean().item()
+            model.last_text_agreement = agreement.mean().item()
+            model.last_text_distill_loss = distill_loss.item()
+        else:
+            tuning_loss = iic_loss
+
         optimizer.zero_grad()
         tuning_loss.backward()
         optimizer.step()
@@ -333,6 +369,10 @@ def train_target(cfg):
     label_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
     alpha_sum = 0.0
     alpha_count = 0
+    text_target_weight_sum = 0.0
+    text_agreement_sum = 0.0
+    text_distill_loss_sum = 0.0
+    text_tuning_count = 0
     logger.info('ProDe adaptive alpha: %s', int(cfg.ProDe.USE_ADAPTIVE_ALPHA) == 1)
     logger.info(
         'ProDe CLIP adaptation: %s',
@@ -389,6 +429,11 @@ def train_target(cfg):
 
         clip_score = test_time_adapt_eval(inputs_test_augs, model, optimizer_ib, optim_state, cfg, outputs_test_new)
         clip_score = clip_score.float()
+        if tune_text_features:
+            text_target_weight_sum += model.last_text_target_weight
+            text_agreement_sum += model.last_text_agreement
+            text_distill_loss_sum += model.last_text_distill_loss
+            text_tuning_count += 1
 
         with torch.no_grad():
             if int(getattr(cfg.ProDe, 'USE_ADAPTIVE_ALPHA', 0)) == 1:
@@ -495,8 +540,16 @@ def train_target(cfg):
                 log_str += '; alpha_mean={:.4f}'.format(alpha_sum / alpha_count)
             if tune_text_features:
                 delta_norm, text_cosine = model.text_feature_diagnostics()
-                log_str += '; text_delta_norm={:.6f}; text_cosine={:.6f}'.format(
-                    delta_norm, text_cosine
+                log_str += (
+                    '; text_delta_norm={:.6f}; text_cosine={:.6f}; '
+                    'text_target_weight={:.4f}; text_agreement={:.4f}; '
+                    'text_distill={:.4f}'
+                ).format(
+                    delta_norm,
+                    text_cosine,
+                    text_target_weight_sum / text_tuning_count,
+                    text_agreement_sum / text_tuning_count,
+                    text_distill_loss_sum / text_tuning_count,
                 )
             if int(getattr(cfg.ProDe, 'USE_ADAPTIVE_ALPHA', 0)) == 1:
                 log_str += '\n' + gate_diagnostics(

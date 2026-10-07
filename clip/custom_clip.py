@@ -328,6 +328,9 @@ class ClipTestTimeTuning(nn.Module):
         self.text_features_wd = None
         self.register_buffer("text_features_init", None)
         self.register_parameter("text_feature_delta", None)
+        self.last_text_target_weight = None
+        self.last_text_agreement = None
+        self.last_text_distill_loss = None
 
     @property
     def dtype(self):
@@ -380,6 +383,18 @@ class ClipTestTimeTuning(nn.Module):
         if self.text_feature_delta is None:
             return self._encode_prompt_text_features()
         return F.normalize(self.text_features_init + self.text_feature_delta, dim=-1)
+
+    def text_feature_tuning_logits(self, image):
+        if self.text_feature_delta is None:
+            raise RuntimeError("Text feature tuning is disabled")
+        with torch.no_grad():
+            image_features = self.image_encoder(image.type(self.dtype))
+            image_features = F.normalize(image_features.float(), dim=-1)
+            initial_text_features = F.normalize(self.text_features_init, dim=-1)
+            initial_logits = self.logit_scale.exp() * image_features @ initial_text_features.t()
+        text_features = self.get_text_features()
+        logits = self.logit_scale.exp() * image_features @ text_features.t()
+        return logits, initial_logits
 
     def inference(self, image):
         with torch.no_grad():
