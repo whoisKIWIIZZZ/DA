@@ -338,6 +338,10 @@ _C.BRIDGE.NTK_SAMPLES = 10            # NTK计算每类采样数
 # --------------------------------- ProDe options ----------------------------- #
 _C.ProDe = CfgNode()
 _C.ProDe.TRAIN_FRACTION = 1.0
+_C.ProDe.TUNE_TEXT_FEATURES = 0
+_C.ProDe.TEXT_FEATURE_LR_MULT = 0.1
+_C.ProDe.TEXT_FEATURE_ANCHOR_WEIGHT = 0.1
+_C.ProDe.TEXT_FEATURE_LOAD = ''
 
 _C.ProDe.ENT = True
 _C.ProDe.GENT = True

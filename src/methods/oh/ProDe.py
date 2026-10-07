@@ -207,8 +207,13 @@ def test_time_tuning(model, inputs, optimizer, cfg, target_output):
             output_logits,_ = model(inputs)             
             output = nn.Softmax(dim=1)(output_logits)
             iic_loss = IID_losses.IID_loss_old(output, target_output)
+        tuning_loss = iic_loss
+        if int(getattr(cfg.ProDe, 'TUNE_TEXT_FEATURES', 0)) == 1:
+            tuning_loss = tuning_loss + (
+                cfg.ProDe.TEXT_FEATURE_ANCHOR_WEIGHT * model.text_feature_anchor_loss()
+            )
         optimizer.zero_grad()
-        iic_loss.backward()
+        tuning_loss.backward()
         optimizer.step()
     return output
 
@@ -227,9 +232,33 @@ def train_target(cfg):
     text_inputs = clip_pre_text(cfg)
     dset_loaders = data_load(cfg)
     model = get_coop(cfg.ProDe.ARCH, cfg.SETTING.DATASET, int(cfg.GPU_ID), cfg.ProDe.N_CTX, cfg.ProDe.CTX_INIT)
-    for name, param in model.named_parameters():
-        if "prompt_learner" not in name:
+    model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
+    tune_text_features = int(getattr(cfg.ProDe, 'TUNE_TEXT_FEATURES', 0)) == 1
+    if tune_text_features:
+        model.enable_text_feature_tuning()
+        for param in model.parameters():
             param.requires_grad_(False)
+        model.text_feature_delta.requires_grad_(True)
+        if cfg.ProDe.TEXT_FEATURE_LOAD:
+            checkpoint = torch.load(cfg.ProDe.TEXT_FEATURE_LOAD, map_location='cpu')
+            checkpoint_classnames = checkpoint.get('classnames')
+            if checkpoint_classnames is not None and checkpoint_classnames != list(cfg.classname):
+                raise ValueError('Loaded text feature classes do not match the current task')
+            text_feature_delta = checkpoint['text_feature_delta'].to(
+                model.text_feature_delta.device
+            )
+            if text_feature_delta.shape != model.text_feature_delta.shape:
+                raise ValueError(
+                    'Loaded text feature delta has shape {}, expected {}'.format(
+                        tuple(text_feature_delta.shape), tuple(model.text_feature_delta.shape)
+                    )
+                )
+            with torch.no_grad():
+                model.text_feature_delta.copy_(text_feature_delta)
+    else:
+        for name, param in model.named_parameters():
+            if "prompt_learner" not in name:
+                param.requires_grad_(False)
     ## set base network
     if cfg.MODEL.ARCH[0:3] == 'res':
         netF = network.ResBase(res_name=cfg.MODEL.ARCH).cuda()
@@ -264,16 +293,21 @@ def train_target(cfg):
     #     else:
     #         v.requires_grad = False
     print("now we dont have netC")
-    for k, v in model.prompt_learner.named_parameters():
-        if(v.requires_grad == True):
-            param_group_ib += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
+    if tune_text_features:
+        param_group_ib.append({
+            'params': model.text_feature_delta,
+            'lr': cfg.OPTIM.LR * cfg.ProDe.TEXT_FEATURE_LR_MULT,
+        })
+    else:
+        for k, v in model.prompt_learner.named_parameters():
+            if v.requires_grad:
+                param_group_ib += [{'params': v, 'lr': cfg.OPTIM.LR * cfg.OPTIM.LR_DECAY1}]
 
     optimizer = optim.SGD(param_group)
     optimizer = op_copy(optimizer)
     optimizer_ib = optim.SGD(param_group_ib)
     optimizer_ib = op_copy(optimizer_ib)
     optim_state = deepcopy(optimizer_ib.state_dict())
-    model.reset_classnames(cfg.classname, cfg.ProDe.ARCH)
     max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
     interval_iter = max_iter // cfg.TEST.INTERVAL
     iter_num = 0
@@ -300,6 +334,10 @@ def train_target(cfg):
     alpha_sum = 0.0
     alpha_count = 0
     logger.info('ProDe adaptive alpha: %s', int(cfg.ProDe.USE_ADAPTIVE_ALPHA) == 1)
+    logger.info(
+        'ProDe CLIP adaptation: %s',
+        'text feature delta' if tune_text_features else 'soft prompt',
+    )
 
     loader = dset_loaders["source"]
     with torch.no_grad():
@@ -455,6 +493,11 @@ def train_target(cfg):
 
             if alpha_count > 0:
                 log_str += '; alpha_mean={:.4f}'.format(alpha_sum / alpha_count)
+            if tune_text_features:
+                delta_norm, text_cosine = model.text_feature_diagnostics()
+                log_str += '; text_delta_norm={:.6f}; text_cosine={:.6f}'.format(
+                    delta_norm, text_cosine
+                )
             if int(getattr(cfg.ProDe, 'USE_ADAPTIVE_ALPHA', 0)) == 1:
                 log_str += '\n' + gate_diagnostics(
                     alpha_bank, alpha_seen, prior_bank, target_prediction_bank,
@@ -480,6 +523,16 @@ def train_target(cfg):
         torch.save(netF.state_dict(), osp.join(cfg.output_dir, "target_F_" + cfg.savename + ".pt"))
         torch.save(netB.state_dict(), osp.join(cfg.output_dir, "target_B_" + cfg.savename + ".pt"))
         torch.save(netC.state_dict(), osp.join(cfg.output_dir, "target_C_" + cfg.savename + ".pt"))
+        if tune_text_features:
+            torch.save(
+                {
+                    'text_features_init': model.text_features_init.detach().cpu(),
+                    'text_feature_delta': model.text_feature_delta.detach().cpu(),
+                    'text_features': model.get_text_features().detach().cpu(),
+                    'classnames': list(cfg.classname),
+                },
+                osp.join(cfg.output_dir, "text_features_" + cfg.savename + ".pt"),
+            )
 
     if cfg.GSFDA:
         test_on_source(cfg, netF, netB, netC, dset_loaders)

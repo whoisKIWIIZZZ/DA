@@ -95,6 +95,17 @@ For domainnet126 and ImageNet variations.
 CUDA_VISIBLE_DEVICES=0 python image_target_in_126.py --cfg "cfgs/domainnet126/difo.yaml" SETTING.S 0 SETTING.T 1
 ```
 
+To run Office-Home A→C with ProDe adaptive alpha and a zero-initialized,
+class-specific text-feature delta, use the dedicated script. It uses the
+`sfa` environment and writes checkpoints under `output/prode_text_feature_ac`.
+```bash
+bash run_prode_text_feature_ac.sh
+```
+Set `ProDe.TUNE_TEXT_FEATURES=1` to optimize the normalized CLIP text
+features directly. `ProDe.TEXT_FEATURE_ANCHOR_WEIGHT` controls cosine
+regularization to the initial CLIP features, and `ProDe.TEXT_FEATURE_LOAD`
+loads a previously saved `text_features_ProDe.pt` checkpoint.
+
 ## Acknowledgements
 + SHOT [official](https://github.com/tim-learn/SHOT)
 + NRC [official](https://github.com/Albert0147/NRC_SFDA)

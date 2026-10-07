@@ -326,6 +326,9 @@ class ClipTestTimeTuning(nn.Module):
         self.prompt_learner = PromptLearner(clip, classnames, batch_size, n_ctx, ctx_init, ctx_position, learned_cls)
         self.criterion = criterion
         self.text_features_wd = None
+        self.register_buffer("text_features_init", None)
+        self.register_parameter("text_feature_delta", None)
+
     @property
     def dtype(self):
         return self.image_encoder.conv1.weight.dtype
@@ -341,27 +344,53 @@ class ClipTestTimeTuning(nn.Module):
         self.prompt_learner.reset_prompt(args,ent_interval,adv_dic,pesu_label)
 
 
-    def get_text_features(self):
-        text_features = []
+    def _encode_prompt_text_features(self):
         prompts = self.prompt_learner()
-        # torch.save(prompts, 'learned_prompts.pt')
-        # torch.save(prompts, 'learned_tokenized.pt')
         tokenized_prompts = self.prompt_learner.tokenized_prompts
-        t_features = self.text_encoder(prompts, tokenized_prompts)
-        text_features.append(t_features / t_features.norm(dim=-1, keepdim=True))
-        text_features = torch.stack(text_features, dim=0)
+        text_features = self.text_encoder(prompts, tokenized_prompts)
+        return F.normalize(text_features, dim=-1)
 
-        return torch.mean(text_features, dim=0)
+    def enable_text_feature_tuning(self):
+        if self.text_feature_delta is not None:
+            raise RuntimeError("Text feature tuning is already enabled")
+        with torch.no_grad():
+            text_features = self._encode_prompt_text_features().float()
+        self.text_features_init = text_features
+        self.text_feature_delta = nn.Parameter(torch.zeros_like(text_features))
+
+    def text_feature_anchor_loss(self):
+        if self.text_feature_delta is None:
+            raise RuntimeError("Text feature tuning is disabled")
+        initial = F.normalize(self.text_features_init, dim=-1)
+        current = F.normalize(self.text_features_init + self.text_feature_delta, dim=-1)
+        cosine_distance = 1.0 - (current * initial).sum(dim=-1)
+        return cosine_distance.clamp_min(0.0).mean()
+
+    def text_feature_diagnostics(self):
+        if self.text_feature_delta is None:
+            raise RuntimeError("Text feature tuning is disabled")
+        with torch.no_grad():
+            initial = F.normalize(self.text_features_init, dim=-1)
+            current = F.normalize(self.text_features_init + self.text_feature_delta, dim=-1)
+            cosine = (current * initial).sum(dim=-1).mean()
+            delta_norm = self.text_feature_delta.norm(dim=-1).mean()
+        return delta_norm.item(), cosine.item()
+
+    def get_text_features(self):
+        if self.text_feature_delta is None:
+            return self._encode_prompt_text_features()
+        return F.normalize(self.text_features_init + self.text_feature_delta, dim=-1)
 
     def inference(self, image):
         with torch.no_grad():
             image_features = self.image_encoder(image.type(self.dtype))
 
         text_features = self.get_text_features()
-        # text_features_save = text_features.clone().detach()
-        # torch.save(text_features_save, 'learned_features.pt')
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        
+        if self.text_feature_delta is None:
+            image_features = F.normalize(image_features, dim=-1)
+        else:
+            image_features = F.normalize(image_features.float(), dim=-1)
+
         logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
 
@@ -407,4 +436,3 @@ def get_coop(clip_arch, test_set, device, n_ctx, ctx_init, learned_cls=False):
                             n_ctx=n_ctx, ctx_init=ctx_init, learned_cls=learned_cls)
 
     return model
-
