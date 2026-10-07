@@ -8,7 +8,6 @@ from torchvision import transforms
 # from src.utils import loss,prompt_tuning,IID_losses
 from src.utils import loss,IID_losses
 from src.utils.adaptive_alpha import adaptive_mix_weight, gate_diagnostics
-import pandas as pd
 
 from src.models import network
 from torch.utils.data import DataLoader
@@ -21,27 +20,6 @@ from src.utils.loss import entropy
 
 from src.utils.adaptive_alpha import test_on_source
 logger = logging.getLogger(__name__)
-
-import wandb
-import copy
-
-def print_grad_hook(grad):
-    if grad.norm().item() > 100:
-        print('Hook: Grad recieved with norm {}'.format(grad.norm().item()))
-
-
-
-
-def image_test_50(resize_size=256, crop_size=224, alexnet=False):
-    normalize = transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
-                                     std=[0.26862954, 0.26130258, 0.27577711])
-
-    return transforms.Compose([
-        transforms.Resize(crop_size, interpolation=Image.BICUBIC),
-        transforms.CenterCrop(crop_size),
-        transforms.ToTensor(),
-        normalize
-    ])
 
 def data_load(cfg,preprocess):
     ## prepare data
@@ -402,7 +380,6 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
     num_sample = len(loader.dataset)
     # score_bank包含所有样本
     score_bank = torch.randn(num_sample, cfg.class_num).cuda()  # 4365目标样本,65类
-    target_ema_decay = cfg.DIFF_ALIGN.MERGE_TARGET_EMA_DECAY
     source_score_bank = torch.zeros(num_sample).cuda()
     clip_score_bank = torch.zeros(num_sample, cfg.class_num).cuda()
     clip_score_seen = torch.zeros(num_sample, dtype=torch.bool, device=score_bank.device)
@@ -443,22 +420,23 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         
         max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"]) #*2
         interval_iter = max_iter  // cfg.TEST.INTERVAL  
-        copy_iter = max_iter  //15// cfg.TEST.INTERVAL  
     else:
         
         max_iter = cfg.TEST.MAX_EPOCH * len(dset_loaders["target"])
         interval_iter = max_iter // cfg.TEST.INTERVAL
-        copy_iter = max_iter  //15// cfg.TEST.INTERVAL
    
   
 
     iter_num = 0
     epoch_num = 0
     text_features = None
-    loss_neg = torch.tensor(0.0)
-
-
     mypromt = promote_learning_diff_promote_learning(cfg, clip_model).to(clip_model.visual.conv1.weight.device)
+    prompt_parameters = [mypromt.prompt_learner.ctx]
+    prompt_lr = getattr(cfg.OPTIM, 'LR', 0.001)
+    prompt_optimizer = torch.optim.SGD(
+        prompt_parameters, lr=prompt_lr, weight_decay=5e-4,
+        momentum=0.9, nesterov=False,
+    )
     gate_log_str = 'Gate: no observations'
     schedule_log_str = 'Schedule: no observations'
     # modelpath = "/home/yishouzhuo/work/sfda/output_Models/uda/VISDA-C/TV/diff_align/CLIP_diff_align_TV_acc=90.18_2026-01-10 01:53:47.762324.pt"
@@ -526,30 +504,6 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         
         # trainable_param = deepcopy(mypromt.prompt_learner.ctx)
 
-        if 'RN' in cfg.DIFF_ALIGN.ARCH:
-            prompt_lr = cfg.OPTIM.LR * 0.1
-            data_transform = image_test_50()
-        else:  # 走这一边
-            data_transform = image_test()
-            #prompt_lr = cfg.OPTIM.LR
-            if iter_num < 3000:
-                prompt_lr =cfg.OPTIM.LR
-            elif iter_num< 6000:
-                prompt_lr = 0.003
-            else:
-                prompt_lr = 0.001
-
-        try:
-            opt_clip.zero_grad()
-        except:
-            prompt_parameters = [mypromt.prompt_learner.ctx]
-            opt_clip = torch.optim.SGD(prompt_parameters, prompt_lr, weight_decay=5e-4, momentum=0.9,
-                                        nesterov=False)
-            opt_clip.zero_grad()
-            if mypromt.prompt_learner.ctx.grad is not None:
-                mypromt.prompt_learner.ctx.grad.data.zero_()
-
-        
         iter_num += 1
         lr_num = 2000 if cfg.SETTING.DATASET == 'office-home' else 10500
         if iter_num < lr_num:  # 600,2000最好
@@ -588,7 +542,7 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         clip_all_output = base_clip_all_output
         q_target = score_bank[tar_idx].detach()
         q_clip = base_clip_all_output.detach()
-        log_prob = F.log_softmax(base_outputs_test, dim=1)
+        log_prob = base_outputs_test if cfg.SETTING.DATASET == "office" or cfg.DA != "uda" else F.log_softmax(base_outputs_test, dim=1) 
         target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
         clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
         (
@@ -623,20 +577,11 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
         else:
             classifier_loss = base_outputs_test.new_zeros(())
 
-        warmup_iter = 80
-        neg_iter = 100
-        bb = 1 - current_aux
-        nnn = 1 - current_aux if iter_num > neg_iter else 0.01
-        bn = -0.3
+
         if use_iid and has_selected_samples:
-            loss_iid, loss_mat = IID_losses.IID_loss(
-                cfg.class_num,
-                softmax_out[indices_greater].detach() if iter_num < warmup_iter else softmax_out[indices_greater],
+            loss_iid = IID_losses.IID_loss_old(
+                softmax_out[indices_greater],
                 clip_all_output[indices_greater],
-                bb,
-                nnn,
-                bn,
-                lamb=1.0
             )
         else:
             loss_iid = base_outputs_test.new_zeros(())
@@ -666,24 +611,17 @@ def train_target(cfg, beta_pre_1=1, beta_pre_2=0.1, use_iid=True, use_cls=True,
 
         optimizer.zero_grad()
         opt_C.zero_grad()
+        prompt_optimizer.zero_grad()
        
         total_loss = classifier_loss + loss_iid - cfg.DIFF_ALIGN.GENT_PAR * gentropy_loss + cfg.DIFF_ALIGN.LENT_PAR * loss_ent
         total_loss.backward()
         optimizer.step()
-        
         opt_C.step()
-       
         if use_clip:
-            if iter_num <  (max_iter/2):
-                with torch.no_grad():
-                    #opt_clip.step()
-                    promt_learning_rate = 0.002
-                    mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
-            else:
-                with torch.no_grad():
-                    #opt_clip.step()
-                    promt_learning_rate = 0.0001
-                    mypromt.prompt_learner.ctx  -=  mypromt.prompt_learner.ctx.grad * promt_learning_rate
+            prompt_lr = 0.002 if iter_num < (max_iter / 2) else 0.0001
+            for group in prompt_optimizer.param_groups:
+                group['lr'] = prompt_lr
+            prompt_optimizer.step()
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             prompt_update_lr = 0.002 if iter_num < (max_iter / 2) else 0.0001

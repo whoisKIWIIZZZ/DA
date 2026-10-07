@@ -13,6 +13,7 @@ from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
 from src.utils.adaptive_alpha import disagreement_diagnostics
+from src.utils.class_fraction import first_per_class
 logger = logging.getLogger(__name__)
 
 
@@ -42,12 +43,15 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
+    txt_tar, _ = first_per_class(txt_tar, cfg.ProDe.TRAIN_FRACTION)
+    logger.info('ProDe_old per-class first fraction %.2f: train=%d test=%d',
+                cfg.ProDe.TRAIN_FRACTION, len(txt_tar), len(txt_test))
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["source"] = ImageList_idx(txt_test, transform=image_test())
-    dset_loaders["source"] = DataLoader(dsets["source"], batch_size=2, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=True)
+    dsets["source"] = ImageList_idx(txt_tar, transform=image_test())
+    dset_loaders["source"] = DataLoader(dsets["source"], batch_size=train_bs, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
 
 def image_test(resize_size=256, crop_size=224, alexnet=False):

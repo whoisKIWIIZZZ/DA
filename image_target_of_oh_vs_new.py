@@ -136,6 +136,10 @@ if __name__ == "__main__":
         else:
             acc = DIFO.train_target(cfg)
 
+    elif cfg.MODEL.METHOD == "difo_old":
+        print("using difo_old method")
+        acc = DIFO_OLD.train_target(cfg)
+
     elif cfg.MODEL.METHOD == "diffadd": #ours
         print("using diffadd method")
         # if 'RN' in cfg.DIFFADD.ARCH:
@@ -154,6 +158,10 @@ if __name__ == "__main__":
     elif cfg.MODEL.METHOD == "ProDe":
         print("using ProDe method")
         acc = ProDe.train_target(cfg)
+
+    elif cfg.MODEL.METHOD == "ProDe_old":
+        print("using ProDe_old method")
+        acc = ProDe_old.train_target(cfg)
 
     elif cfg.MODEL.METHOD == "ProDe_diff":
         print("using ProDe+diff method (with negative classes)")

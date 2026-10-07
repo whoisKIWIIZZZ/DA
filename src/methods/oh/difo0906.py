@@ -11,6 +11,7 @@ from src.data.data_list import  ImageList_idx
 from sklearn.metrics import confusion_matrix
 import clip
 from src.utils.utils import *
+from src.utils.class_fraction import first_per_class
 logger = logging.getLogger(__name__)
 
 
@@ -40,8 +41,13 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
+    txt_tar, _ = first_per_class(txt_tar, cfg.DIFO.TRAIN_FRACTION)
+    logger.info('DIFO_old per-class first fraction %.2f: train=%d test=%d',
+                cfg.DIFO.TRAIN_FRACTION, len(txt_tar), len(txt_test))
     dsets["target"] = ImageList_idx(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["target_eval"] = ImageList_idx(txt_tar, transform=image_test())
+    dset_loaders["target_eval"] = DataLoader(dsets["target_eval"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     return dset_loaders
@@ -202,7 +208,7 @@ def train_target(cfg):
             netF.eval()
             netB.eval()
             netC.eval()
-            confi_imag,confi_dis,clip_all_output = obtain_label(dset_loaders['test'], netF, netB, netC,text_inputs,text_features,clip_model)
+            confi_imag,confi_dis,clip_all_output = obtain_label(dset_loaders['target_eval'], netF, netB, netC,text_inputs,text_features,clip_model)
             clip_all_output = clip_all_output.cuda()
             text_features = prompt_tuning.prompt_main(cfg,confi_imag,confi_dis,iter_num)
             cfg.load = 'prompt_model.pt'

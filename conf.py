@@ -137,6 +137,7 @@ _C.SOURCE.EPSILON = 1e-5
 _C.SOURCE.SMOOTH = 0.1
 
 _C.SOURCE.TRTE = 'val'
+_C.SOURCE.TRAIN_FRACTION = 1.0
 # --------------------------------- NRC options --------------------------- #
 _C.NRC = CfgNode()
 
@@ -241,6 +242,7 @@ _C.LCFD.ARCH = 'ViT-B/32' #['RN50', 'ViT-B/32','RN101','ViT-B/16']
 _C.LCFD.TTA_STEPS = 1
 # --------------------------------- DIFO options ----------------------------- #
 _C.DIFO = CfgNode()
+_C.DIFO.TRAIN_FRACTION = 1.0
 
 _C.DIFO.CLS_PAR = 0.4
 _C.DIFO.ENT = True
@@ -335,6 +337,7 @@ _C.BRIDGE.NTK_SAMPLES = 10            # NTK计算每类采样数
 
 # --------------------------------- ProDe options ----------------------------- #
 _C.ProDe = CfgNode()
+_C.ProDe.TRAIN_FRACTION = 1.0
 
 _C.ProDe.ENT = True
 _C.ProDe.GENT = True

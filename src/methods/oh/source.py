@@ -12,6 +12,7 @@ from src.data.data_list import ImageList, ImageList_idx
 from scipy.spatial.distance import cdist
 from sklearn.metrics import confusion_matrix
 from src.utils.utils import *
+from src.utils.class_fraction import first_per_class
 from sklearn.cluster import KMeans
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,11 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_test = new_tar.copy()
 
-    if cfg.SOURCE.TRTE == "val":
+    if cfg.SOURCE.TRAIN_FRACTION < 1:
+        tr_txt, te_txt = first_per_class(txt_src, cfg.SOURCE.TRAIN_FRACTION)
+        logger.info('Source per-class first fraction %.2f: train=%d holdout=%d',
+                    cfg.SOURCE.TRAIN_FRACTION, len(tr_txt), len(te_txt))
+    elif cfg.SOURCE.TRTE == "val":
         dsize = len(txt_src)
         tr_size = int(0.9*dsize)
         # print(dsize, tr_size, dsize - tr_size)

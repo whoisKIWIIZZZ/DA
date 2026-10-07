@@ -7,6 +7,7 @@ import torch.optim as optim
 from torchvision import transforms
 from src.utils import loss,prompt_tuning,IID_losses
 from src.utils.adaptive_alpha import adaptive_mix_weight, gate_diagnostics, test_on_source
+from src.utils.class_fraction import first_per_class
 from src.models import network
 from torch.utils.data import DataLoader
 from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
@@ -53,8 +54,13 @@ def data_load(cfg):
                 line = reci[0] + ' ' + str(label_map_s[int(reci[1])]) + '\n'
                 new_src.append(line)
         txt_src = new_src.copy()
+    txt_tar, _ = first_per_class(txt_tar, cfg.DIFO.TRAIN_FRACTION)
+    logger.info('DIFO per-class first fraction %.2f: train=%d test=%d',
+                cfg.DIFO.TRAIN_FRACTION, len(txt_tar), len(txt_test))
     dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["target_eval"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_test())
+    dset_loaders["target_eval"] = DataLoader(dsets["target_eval"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx_aug_fix_old(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["source_test"] = ImageList_idx_aug_fix_old(txt_src, transform=image_test())
@@ -256,7 +262,7 @@ def train_target(cfg):
             netF.eval()
             netB.eval()
             netC.eval()
-            confi_imag,confi_dis,clip_all_output = obtain_label(cfg,dset_loaders['test'], netF, netB, netC,text_inputs,text_features,clip_model)
+            confi_imag,confi_dis,clip_all_output = obtain_label(cfg,dset_loaders['target_eval'], netF, netB, netC,text_inputs,text_features,clip_model)
             clip_all_output = clip_all_output.cuda()
             text_features = prompt_tuning.prompt_main(cfg,confi_imag,confi_dis,iter_num)
             cfg.load = 'prompt_model.pt'
@@ -274,7 +280,7 @@ def train_target(cfg):
         
         q_target = score_bank[tar_idx].detach()
         q_clip = clip_all_output[tar_idx][:, :cfg.class_num].detach()
-        log_prob = outputs_test if cfg.SETTING.DATASET == "office" or cfg.DA != "uda" else F.log_softmax(outputs_test, dim=1) 
+        log_prob = outputs_test if cfg.SETTING.DATASET == "office" or cfg.DA != "uda" else F.log_softmax(outputs_test, dim=1) #pda我们也不需要log prob
         target_loss_per_sample = -(q_target * log_prob).sum(dim=1)
         clip_loss_per_sample = -(q_clip * log_prob).sum(dim=1)
         details = adaptive_mix_weight(
