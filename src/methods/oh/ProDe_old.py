@@ -4,16 +4,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms
-from src.utils import loss,prompt_tuning,IID_losses
+from src.utils import loss, prompt_tuning, IID_losses_official as IID_losses
 from src.models import network
 from torch.utils.data import DataLoader
-from src.data.data_list import  ImageList_idx, ImageList_idx_aug_fix_old
+from src.data.data_list import ImageList_idx, ImageList_idx_aug_fix_old as ImageList_idx_aug_fix
 from sklearn.metrics import confusion_matrix
 from clip.custom_clip import get_coop
 import clip
 from src.utils.utils import *
-from src.utils.adaptive_alpha import disagreement_diagnostics
-from src.utils.class_fraction import first_per_class
 logger = logging.getLogger(__name__)
 
 
@@ -43,15 +41,12 @@ def data_load(cfg):
                     new_tar.append(line)
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
-    txt_tar, _ = first_per_class(txt_tar, cfg.ProDe.TRAIN_FRACTION)
-    logger.info('ProDe_old per-class first fraction %.2f: train=%d test=%d',
-                cfg.ProDe.TRAIN_FRACTION, len(txt_tar), len(txt_test))
-    dsets["target"] = ImageList_idx_aug_fix_old(txt_tar, transform=image_train())
+    dsets["target"] = ImageList_idx_aug_fix(txt_tar, transform=image_train())
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=False)
     dsets["test"] = ImageList_idx(txt_test, transform=image_test())
     dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
-    dsets["source"] = ImageList_idx(txt_tar, transform=image_test())
-    dset_loaders["source"] = DataLoader(dsets["source"], batch_size=train_bs, shuffle=False, num_workers=cfg.NUM_WORKERS, drop_last=False)
+    dsets["source"] = ImageList_idx(txt_test, transform=image_test())
+    dset_loaders["source"] = DataLoader(dsets["source"], batch_size=2, shuffle=True, num_workers=cfg.NUM_WORKERS, drop_last=True)
     return dset_loaders
 
 def image_test(resize_size=256, crop_size=224, alexnet=False):
@@ -140,7 +135,7 @@ def test_time_tuning(model, inputs, optimizer, cfg, target_output):
         with torch.amp.autocast('cuda'):
             output_logits,_ = model(inputs)             
             output = nn.Softmax(dim=1)(output_logits)
-            iic_loss = IID_losses.IID_loss_old(output, target_output)
+            iic_loss = IID_losses.IID_loss(output, target_output)
         optimizer.zero_grad()
         iic_loss.backward()
         optimizer.step()
@@ -211,10 +206,6 @@ def train_target(cfg):
     iter_num = 0
     num_sample=len(dset_loaders["target"].dataset)
     logtis_bank = torch.randn(num_sample, cfg.class_num).cuda()
-    target_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
-    clip_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
-    selected_prediction_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
-    label_bank = torch.full((num_sample,), -1, dtype=torch.long, device=logtis_bank.device)
 
     loader = dset_loaders["source"]
     with torch.no_grad():
@@ -231,10 +222,10 @@ def train_target(cfg):
 
     while iter_num < max_iter:
         try:
-            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
         except:
             iter_test = iter(dset_loaders["target"])
-            (inputs_test, inputs_test_augs), labels, tar_idx = next(iter_test)
+            (inputs_test, inputs_test_augs), _, tar_idx = next(iter_test)
         if inputs_test.size(0) == 1:
             continue
 
@@ -260,15 +251,11 @@ def train_target(cfg):
 
         with torch.no_grad():
             new_clip = (outputs_test_new - 1*logtis_bank[tar_idx].cuda()) + clip_score.cuda()
-            target_prediction_bank[tar_idx] = outputs_test_new.argmax(dim=1)
-            clip_prediction_bank[tar_idx] = clip_score.argmax(dim=1)
-            selected_prediction_bank[tar_idx] = new_clip.argmax(dim=1)
-            label_bank[tar_idx] = labels.to(label_bank.device).long()
             clip_score_sm = nn.Softmax(dim=1)(new_clip)
         
         _,clip_index_new = torch.max(new_clip, 1)
         clip_score_sm = nn.Softmax(dim=1)(new_clip)
-        iic_loss = IID_losses.IID_loss_old(softmax_out, clip_score_sm)
+        iic_loss = IID_losses.IID_loss(softmax_out, clip_score_sm)
         classifier_loss = cfg.ProDe.IIC_PAR * iic_loss
         msoftmax = softmax_out.mean(dim=0)
 
@@ -299,11 +286,6 @@ def train_target(cfg):
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%;loss ={}'.format(cfg.name, iter_num, max_iter, acc_s_te,classifier_loss)
-
-            log_str += '\n' + disagreement_diagnostics(
-                target_prediction_bank, clip_prediction_bank,
-                selected_prediction_bank, label_bank
-            )
 
             logger.info(log_str)
             netF.train()

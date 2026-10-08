@@ -140,6 +140,18 @@ bash run_prode_prompt_ac_60epoch.sh
 The runner uses the full-source checkpoint, evaluates every two epochs, and
 writes both experiments under `output/prode_prompt_ac_60epoch`.
 
+`src/methods/oh/ProDe_old.py` is pinned to upstream commit
+`5f7fe578c64ad84a9126157c3aab3aa4ba825bc6`. Its training code matches the
+upstream `ProDe.py`; two import-only compatibility changes select the
+repository's preserved original augmentation dataset and an exact copy of the
+upstream IID loss. The previous local implementation is retained by Git tag
+`prode-old-local-before-official-20261008`. Run the pinned official AC
+60-epoch experiment with:
+```bash
+bash run_prode_official_prompt_ac_60epoch.sh
+```
+Results are written under `output/prode_official_prompt_ac_60epoch`.
+
 ## Acknowledgements
 + SHOT [official](https://github.com/tim-learn/SHOT)
 + NRC [official](https://github.com/Albert0147/NRC_SFDA)
