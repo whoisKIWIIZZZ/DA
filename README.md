@@ -151,6 +151,24 @@ upstream IID loss. The previous local implementation is retained by Git tag
 bash run_prode_official_prompt_ac_60epoch.sh
 ```
 Results are written under `output/prode_official_prompt_ac_60epoch`.
+The runner enables deterministic PyTorch/CUDNN execution and records the Git
+commit, upstream commit, command, environment packages, GPU/driver, source
+checkpoint hashes, dataset-list hashes, and all Art/Clipart image hashes in
+`manifest.txt`. Re-run the one-epoch full-data determinism check with:
+```bash
+bash run_prode_official_repro_smoke.sh
+```
+It trains twice from the same inputs and requires every tensor in the three
+saved target checkpoints to be bitwise equal.
+
+Run the same 60-epoch ProDe adaptive-alpha configuration over all twelve
+directed Office-Home tasks on physical GPU 0 with:
+```bash
+bash run_prode_adaptive_prompt_12tasks_60epoch.sh
+```
+The runner uses the original soft prompt, full-source checkpoints, seed 2020,
+deterministic CUDA/CUDNN settings, and writes a complete manifest under
+`output/prode_adaptive_prompt_12tasks_60epoch`.
 
 ## Acknowledgements
 + SHOT [official](https://github.com/tim-learn/SHOT)

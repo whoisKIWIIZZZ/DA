@@ -405,6 +405,7 @@ _C.CUDNN = CfgNode()
 
 # Benchmark to select fastest CUDNN algorithms (best for fixed input sizes)
 _C.CUDNN.BENCHMARK = True
+_C.CUDNN.DETERMINISTIC = False
 
 # --------------------------------- Default config -------------------------- #
 _CFG_DEFAULT = _C.clone()

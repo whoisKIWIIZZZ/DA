@@ -76,6 +76,11 @@ if __name__ == "__main__":
     np.random.seed(cfg.SETTING.SEED)
     random.seed(cfg.SETTING.SEED)
     torch.backends.cudnn.benchmark = cfg.CUDNN.BENCHMARK
+    torch.backends.cudnn.deterministic = cfg.CUDNN.DETERMINISTIC
+    if cfg.CUDNN.DETERMINISTIC:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
     if cfg.SETTING.DATASET == 'office-home':
         if cfg.DA == 'pda':
