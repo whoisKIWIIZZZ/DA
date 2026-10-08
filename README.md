@@ -132,6 +132,14 @@ controls cosine regularization to the initial
 CLIP features. `ProDe.TEXT_FEATURE_LOAD` loads a previously saved
 `text_features_ProDe.pt` checkpoint.
 
+Run the Office-Home A→C 60-epoch comparison between `ProDe_old` and ProDe
+adaptive alpha with the original soft-prompt tuning path:
+```bash
+bash run_prode_prompt_ac_60epoch.sh
+```
+The runner uses the full-source checkpoint, evaluates every two epochs, and
+writes both experiments under `output/prode_prompt_ac_60epoch`.
+
 ## Acknowledgements
 + SHOT [official](https://github.com/tim-learn/SHOT)
 + NRC [official](https://github.com/Albert0147/NRC_SFDA)
